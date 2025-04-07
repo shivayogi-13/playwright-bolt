@@ -1,3 +1,5 @@
+/// <reference types="vite/client" />
+
 import React, { useState, useEffect } from 'react';
 import {
   Box,
@@ -41,7 +43,18 @@ import AddIcon from '@mui/icons-material/Add';
 import DeleteIcon from '@mui/icons-material/Delete';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import ExpandLessIcon from '@mui/icons-material/ExpandLess';
+import EditIcon from '@mui/icons-material/Edit';
+import AddCircleOutlineIcon from '@mui/icons-material/AddCircleOutline';
 import * as XLSX from 'xlsx';
+
+interface Assertion {
+  field: string;
+  operator: string;
+  value: string;
+  type: string;
+  validationType?: 'value' | 'schema';
+  schema?: string;
+}
 
 interface ConfigFormData {
   baseUrl: string;
@@ -60,10 +73,33 @@ export interface ApiRequest {
   body: string;
   expectedStatus: number;
   suite: string;
+  assertions: Assertion[];
 }
 
 interface ExpandedState {
   [key: number]: boolean;
+}
+
+interface TestStatus {
+  name: string;
+  status: 'pending' | 'running' | 'passed' | 'failed';
+  duration: number;
+  suite: string;
+  logs: string;
+  method: string;
+  endpoint: string;
+  headers: string;
+  body: string;
+  expectedStatus: number;
+  isExpanded: boolean;
+  assertions?: Assertion[];
+  assertionResults?: {
+    field: string;
+    expected: string;
+    actual: any;
+    passed: boolean;
+    message: string;
+  }[];
 }
 
 const defaultApiRequest: ApiRequest = {
@@ -74,11 +110,13 @@ const defaultApiRequest: ApiRequest = {
   body: '{}',
   expectedStatus: 200,
   suite: 'regression',
+  assertions: [],
 };
 
 const STORAGE_KEYS = {
   CONFIG: 'test_automation_config',
   API_REQUESTS: 'test_automation_api_requests',
+  TEST_STATUS: 'test_automation_status'
 };
 
 export const TEST_SUITES = {
@@ -95,6 +133,8 @@ function ConfigurationPanel() {
   const [isApiDialogOpen, setIsApiDialogOpen] = useState(false);
   const [currentApiRequest, setCurrentApiRequest] = useState<ApiRequest>(defaultApiRequest);
   const [expanded, setExpanded] = useState<ExpandedState>({});
+  const [isEditing, setIsEditing] = useState(false);
+  const [editIndex, setEditIndex] = useState<number | null>(null);
 
   const { control, handleSubmit, watch, reset } = useForm<ConfigFormData>({
     defaultValues: {
@@ -145,6 +185,8 @@ function ConfigurationPanel() {
 
   const handleApiDialogOpen = () => {
     setCurrentApiRequest(defaultApiRequest);
+    setIsEditing(false);
+    setEditIndex(null);
     setIsApiDialogOpen(true);
   };
 
@@ -152,39 +194,114 @@ function ConfigurationPanel() {
     setIsApiDialogOpen(false);
   };
 
+  const handleEditApiRequest = (index: number) => {
+    const requestToEdit = apiRequests[index];
+    setCurrentApiRequest({
+      ...requestToEdit,
+      assertions: requestToEdit.assertions?.map(assertion => ({
+        ...assertion,
+        validationType: assertion.validationType || 'value',
+        schema: assertion.schema || ''
+      })) || []
+    });
+    setIsEditing(true);
+    setEditIndex(index);
+    setIsApiDialogOpen(true);
+  };
+
   const handleApiRequestSave = () => {
     if (currentApiRequest.name && currentApiRequest.endpoint) {
       try {
-        let headers = {};
-        try {
-          headers = JSON.parse(currentApiRequest.headers);
-        } catch (e) {
-          headers = {};
-        }
-        
-        if (bearerToken) {
-          headers = {
-            ...headers,
-            Authorization: `Bearer ${bearerToken}`,
-          };
-        }
+        // Validate schema if schema validation is selected
+        const assertions = currentApiRequest.assertions?.map(assertion => {
+          if (assertion.validationType === 'schema' && assertion.schema) {
+            try {
+              // Validate JSON schema format
+              JSON.parse(assertion.schema);
+              return {
+                ...assertion,
+                schema: assertion.schema
+              };
+            } catch (error) {
+              throw new Error(`Invalid JSON Schema in assertion for field ${assertion.field}: ${error instanceof Error ? error.message : String(error)}`);
+            }
+          }
+          return assertion;
+        }) || [];
 
-        const newRequest = {
-          ...currentApiRequest,
-          headers: JSON.stringify(headers, null, 2),
+        // Check for response variables in the body and headers
+        const bodyWithVariables = replaceResponseVariables(currentApiRequest.body);
+        const headersWithVariables = replaceResponseVariables(currentApiRequest.headers);
+
+        const newRequest: ApiRequest = {
+          name: currentApiRequest.name,
+          method: currentApiRequest.method,
+          endpoint: currentApiRequest.endpoint,
+          headers: headersWithVariables,
+          body: bodyWithVariables,
+          expectedStatus: currentApiRequest.expectedStatus,
+          suite: currentApiRequest.suite,
+          assertions
         };
 
-        const updatedRequests = [...apiRequests, newRequest];
-        setApiRequests(updatedRequests);
-        localStorage.setItem(STORAGE_KEYS.API_REQUESTS, JSON.stringify(updatedRequests));
+        const savedRequests = localStorage.getItem(STORAGE_KEYS.API_REQUESTS);
+        const requests: ApiRequest[] = savedRequests ? JSON.parse(savedRequests) : [];
+        
+        const existingIndex = requests.findIndex(r => r.name === newRequest.name);
+        if (existingIndex >= 0) {
+          requests[existingIndex] = newRequest;
+        } else {
+          requests.push(newRequest);
+        }
+
+        localStorage.setItem(STORAGE_KEYS.API_REQUESTS, JSON.stringify(requests));
+
+        // Also update test status if it exists
+        const savedStatus = localStorage.getItem(STORAGE_KEYS.TEST_STATUS);
+        if (savedStatus) {
+          const status: TestStatus[] = JSON.parse(savedStatus);
+          const existingStatusIndex = status.findIndex(s => s.name === newRequest.name);
+          if (existingStatusIndex >= 0) {
+            status[existingStatusIndex] = {
+              ...status[existingStatusIndex],
+              method: newRequest.method,
+              endpoint: newRequest.endpoint,
+              headers: newRequest.headers,
+              body: newRequest.body,
+              expectedStatus: newRequest.expectedStatus,
+              suite: newRequest.suite,
+              assertions: newRequest.assertions || []
+            };
+            localStorage.setItem(STORAGE_KEYS.TEST_STATUS, JSON.stringify(status));
+          }
+        }
+
         setIsApiDialogOpen(false);
-        enqueueSnackbar('API request added successfully', { variant: 'success' });
+        setCurrentApiRequest(defaultApiRequest);
+        enqueueSnackbar('Test request saved successfully', { variant: 'success' });
       } catch (error) {
-        enqueueSnackbar('Error saving API request', { variant: 'error' });
+        console.error('Error saving test request:', error);
+        enqueueSnackbar(error instanceof Error ? error.message : 'Error saving test request', { variant: 'error' });
       }
     } else {
       enqueueSnackbar('Please fill in all required fields', { variant: 'warning' });
     }
+  };
+
+  const replaceResponseVariables = (content: string): string => {
+    // Replace variables in format ${response.testName.field}
+    return content.replace(/\${response\.([^.]+)\.([^}]+)}/g, (match, testName, field) => {
+      try {
+        const storedResponse = localStorage.getItem(`response_${testName}`);
+        if (storedResponse) {
+          const responseData = JSON.parse(storedResponse);
+          return responseData[field] || match;
+        }
+      } catch (error) {
+        console.error(`Error accessing stored response for ${testName}:`, error);
+      }
+      return match;
+    });
   };
 
   const handleDeleteApiRequest = (index: number) => {
@@ -483,12 +600,20 @@ function ConfigurationPanel() {
                         </TableCell>
                         <TableCell>{request.expectedStatus}</TableCell>
                         <TableCell>
-                          <IconButton
-                            color="error"
-                            onClick={() => handleDeleteApiRequest(index)}
-                          >
-                            <DeleteIcon />
-                          </IconButton>
+                          <Box sx={{ display: 'flex', gap: 1 }}>
+                            <IconButton
+                              color="primary"
+                              onClick={() => handleEditApiRequest(index)}
+                            >
+                              <EditIcon />
+                            </IconButton>
+                            <IconButton
+                              color="error"
+                              onClick={() => handleDeleteApiRequest(index)}
+                            >
+                              <DeleteIcon />
+                            </IconButton>
+                          </Box>
                         </TableCell>
                       </TableRow>
                       <TableRow>
@@ -560,7 +685,7 @@ function ConfigurationPanel() {
       </Box>
 
       <Dialog open={isApiDialogOpen} onClose={handleApiDialogClose} maxWidth="md" fullWidth>
-        <DialogTitle>Add API Request</DialogTitle>
+        <DialogTitle>{isEditing ? 'Edit' : 'Add'} API Request</DialogTitle>
         <DialogContent>
           <Grid container spacing={2} sx={{ mt: 1 }}>
             <Grid item xs={12}>
@@ -642,6 +767,142 @@ function ConfigurationPanel() {
                 onChange={(e) => setCurrentApiRequest({ ...currentApiRequest, body: e.target.value })}
                 helperText="Enter request body in JSON format"
               />
+            </Grid>
+            <Grid item xs={12}>
+              <Typography variant="h6" gutterBottom>
+                Assertions
+              </Typography>
+              <Box sx={{ mb: 2 }}>
+                {currentApiRequest.assertions?.map((assertion, index) => (
+                  <Box key={index} sx={{ display: 'flex', gap: 2, mb: 2 }}>
+                    <TextField
+                      fullWidth
+                      label="Field Path"
+                      value={assertion.field}
+                      onChange={(e) => {
+                        const newAssertions = [...(currentApiRequest.assertions || [])];
+                        newAssertions[index].field = e.target.value;
+                        setCurrentApiRequest({ ...currentApiRequest, assertions: newAssertions });
+                      }}
+                      placeholder="e.g., data.user.id"
+                    />
+                    <FormControl sx={{ minWidth: 120 }}>
+                      <InputLabel>Validation Type</InputLabel>
+                      <Select
+                        value={assertion.validationType || 'value'}
+                        label="Validation Type"
+                        onChange={(e) => {
+                          const newAssertions = [...(currentApiRequest.assertions || [])];
+                          newAssertions[index].validationType = e.target.value as 'value' | 'schema';
+                          setCurrentApiRequest({ ...currentApiRequest, assertions: newAssertions });
+                        }}
+                      >
+                        <MenuItem value="value">Value</MenuItem>
+                        <MenuItem value="schema">Schema</MenuItem>
+                      </Select>
+                    </FormControl>
+                    {assertion.validationType === 'value' ? (
+                      <>
+                        <FormControl sx={{ minWidth: 120 }}>
+                          <InputLabel>Operator</InputLabel>
+                          <Select
+                            value={assertion.operator}
+                            label="Operator"
+                            onChange={(e) => {
+                              const newAssertions = [...(currentApiRequest.assertions || [])];
+                              newAssertions[index].operator = e.target.value;
+                              setCurrentApiRequest({ ...currentApiRequest, assertions: newAssertions });
+                            }}
+                          >
+                            <MenuItem value="equals">Equals</MenuItem>
+                            <MenuItem value="notEquals">Not Equals</MenuItem>
+                            <MenuItem value="contains">Contains</MenuItem>
+                            <MenuItem value="notContains">Not Contains</MenuItem>
+                            <MenuItem value="greaterThan">Greater Than</MenuItem>
+                            <MenuItem value="lessThan">Less Than</MenuItem>
+                            <MenuItem value="exists">Exists</MenuItem>
+                            <MenuItem value="notExists">Not Exists</MenuItem>
+                          </Select>
+                        </FormControl>
+                        <TextField
+                          fullWidth
+                          label="Expected Value"
+                          value={assertion.value}
+                          onChange={(e) => {
+                            const newAssertions = [...(currentApiRequest.assertions || [])];
+                            newAssertions[index].value = e.target.value;
+                            setCurrentApiRequest({ ...currentApiRequest, assertions: newAssertions });
+                          }}
+                          placeholder="Expected value"
+                        />
+                      </>
+                    ) : (
+                      <TextField
+                        fullWidth
+                        label="JSON Schema"
+                        multiline
+                        rows={4}
+                        value={assertion.schema || ''}
+                        onChange={(e) => {
+                          const newAssertions = [...(currentApiRequest.assertions || [])];
+                          newAssertions[index].schema = e.target.value;
+                          setCurrentApiRequest({ ...currentApiRequest, assertions: newAssertions });
+                        }}
+                        placeholder="Enter JSON Schema for validation"
+                        helperText="Enter a valid JSON Schema to validate the field"
+                      />
+                    )}
+                    <FormControl sx={{ minWidth: 120 }}>
+                      <InputLabel>Type</InputLabel>
+                      <Select
+                        value={assertion.type}
+                        label="Type"
+                        onChange={(e) => {
+                          const newAssertions = [...(currentApiRequest.assertions || [])];
+                          newAssertions[index].type = e.target.value;
+                          setCurrentApiRequest({ ...currentApiRequest, assertions: newAssertions });
+                        }}
+                      >
+                        <MenuItem value="string">String</MenuItem>
+                        <MenuItem value="number">Number</MenuItem>
+                        <MenuItem value="boolean">Boolean</MenuItem>
+                        <MenuItem value="array">Array</MenuItem>
+                        <MenuItem value="object">Object</MenuItem>
+                      </Select>
+                    </FormControl>
+                    <IconButton
+                      color="error"
+                      onClick={() => {
+                        const newAssertions = (currentApiRequest.assertions || []).filter((_, i) => i !== index);
+                        setCurrentApiRequest({ ...currentApiRequest, assertions: newAssertions });
+                      }}
+                    >
+                      <DeleteIcon />
+                    </IconButton>
+                  </Box>
+                ))}
+                <Button
+                  variant="outlined"
+                  startIcon={<AddCircleOutlineIcon />}
+                  onClick={() => {
+                    setCurrentApiRequest({
+                      ...currentApiRequest,
+                      assertions: [
+                        ...(currentApiRequest.assertions || []),
+                        { 
+                          field: '', 
+                          operator: 'equals', 
+                          value: '', 
+                          type: 'string',
+                          validationType: 'value'
+                        }
+                      ]
+                    });
+                  }}
+                >
+                  Add Assertion
+                </Button>
+              </Box>
             </Grid>
           </Grid>
         </DialogContent>
