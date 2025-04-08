@@ -30,6 +30,9 @@ import {
   Paper,
   Collapse,
   Chip,
+  Accordion,
+  AccordionSummary,
+  AccordionDetails,
 } from '@mui/material';
 import { LoadingButton } from '@mui/lab';
 import { useForm, Controller } from 'react-hook-form';
@@ -46,6 +49,8 @@ import ExpandLessIcon from '@mui/icons-material/ExpandLess';
 import EditIcon from '@mui/icons-material/Edit';
 import AddCircleOutlineIcon from '@mui/icons-material/AddCircleOutline';
 import * as XLSX from 'xlsx';
+import { TOTP } from 'otpauth';
+import ContentCopyIcon from '@mui/icons-material/ContentCopy';
 
 interface Assertion {
   field: string;
@@ -63,6 +68,8 @@ interface ConfigFormData {
   mfaEnabled: boolean;
   mfaSecretKey: string;
   bearerToken: string;
+  currentTotpCode: string;
+  cookies: string;
 }
 
 export interface ApiRequest {
@@ -102,6 +109,28 @@ interface TestStatus {
   }[];
 }
 
+interface Cookie {
+  name: string;
+  value: string;
+  domain: string;
+  path: string;
+  expires?: string;
+  secure: boolean;
+  httpOnly: boolean;
+}
+
+interface TestCookies {
+  testName: string;
+  cookies: Cookie[];
+}
+
+interface TestVariables {
+  testName: string;
+  variables: Variable[];
+  cookies?: Cookie[];
+  bearerToken?: string;
+}
+
 const defaultApiRequest: ApiRequest = {
   name: '',
   method: 'GET',
@@ -135,15 +164,21 @@ function ConfigurationPanel() {
   const [expanded, setExpanded] = useState<ExpandedState>({});
   const [isEditing, setIsEditing] = useState(false);
   const [editIndex, setEditIndex] = useState<number | null>(null);
+  const [currentTotpCode, setCurrentTotpCode] = useState<string>('');
+  const [lastGenerated, setLastGenerated] = useState<number>(0);
+  const [testCookies, setTestCookies] = useState<TestCookies[]>([]);
+  const [testVariables, setTestVariables] = useState<TestVariables[]>([]);
 
   const { control, handleSubmit, watch, reset } = useForm<ConfigFormData>({
     defaultValues: {
-      baseUrl: import.meta.env.VITE_BASE_URL || 'http://localhost:3000',
+      baseUrl: import.meta.env.VITE_API_BASE_URL || '',
       testUserEmail: import.meta.env.VITE_TEST_USER_EMAIL || '',
       testUserPassword: import.meta.env.VITE_TEST_USER_PASSWORD || '',
-      mfaEnabled: true,
+      mfaEnabled: import.meta.env.VITE_MFA_ENABLED === 'true',
       mfaSecretKey: import.meta.env.VITE_MFA_SECRET_KEY || '',
       bearerToken: '',
+      currentTotpCode: '',
+      cookies: '',
     },
   });
 
@@ -170,6 +205,101 @@ function ConfigurationPanel() {
 
     loadSavedData();
   }, [reset, enqueueSnackbar]);
+
+  // Generate TOTP code every 30 seconds
+  useEffect(() => {
+    const generateTotpCode = () => {
+      const mfaSecretKey = watch('mfaSecretKey');
+      const mfaEnabled = watch('mfaEnabled');
+      
+      if (mfaEnabled && mfaSecretKey) {
+        const now = Date.now();
+        if (now - lastGenerated >= 30000) { // 30 seconds
+          try {
+            const totp = new TOTP({
+              secret: mfaSecretKey,
+              algorithm: 'SHA1',
+              digits: 6,
+              period: 30
+            });
+            const code = totp.generate();
+            setCurrentTotpCode(code);
+            setLastGenerated(now);
+          } catch (error) {
+            console.error('Error generating TOTP:', error);
+          }
+        }
+      }
+    };
+
+    const interval = setInterval(generateTotpCode, 1000);
+    return () => clearInterval(interval);
+  }, [watch, lastGenerated]);
+
+  // Listen for cookie updates from ExecutionPanel
+  useEffect(() => {
+    const handleCookieUpdate = (event: CustomEvent) => {
+      const { testName, cookies } = event.detail;
+      if (cookies && cookies.length > 0) {
+        setTestCookies(prevCookies => {
+          const existingTestIndex = prevCookies.findIndex(tc => tc.testName === testName);
+          if (existingTestIndex >= 0) {
+            const updated = [...prevCookies];
+            updated[existingTestIndex] = { testName, cookies };
+            return updated;
+          }
+          return [...prevCookies, { testName, cookies }];
+        });
+        enqueueSnackbar(`New cookies captured from test: ${testName}`, { variant: 'success' });
+      }
+    };
+
+    window.addEventListener('test_cookies_updated', handleCookieUpdate as EventListener);
+    return () => {
+      window.removeEventListener('test_cookies_updated', handleCookieUpdate as EventListener);
+    };
+  }, [enqueueSnackbar]);
+
+  // Load saved cookies on mount
+  useEffect(() => {
+    const savedCookies = localStorage.getItem('test_cookies');
+    if (savedCookies) {
+      try {
+        const cookies = JSON.parse(savedCookies);
+        const testCookiesArray = Object.entries(cookies).map(([testName, cookies]) => ({
+          testName,
+          cookies: cookies as Cookie[]
+        }));
+        setTestCookies(testCookiesArray);
+      } catch (error) {
+        console.error('Error loading saved cookies:', error);
+      }
+    }
+  }, []);
+
+  // Listen for Bearer token updates
+  useEffect(() => {
+    const handleBearerTokenUpdate = (event: CustomEvent) => {
+      const { testName, bearerToken } = event.detail;
+      if (bearerToken) {
+        setTestVariables(prevVariables => {
+          const existingTestIndex = prevVariables.findIndex(v => v.testName === testName);
+          if (existingTestIndex >= 0) {
+            const updated = [...prevVariables];
+            updated[existingTestIndex] = { ...updated[existingTestIndex], bearerToken };
+            return updated;
+          }
+          return [...prevVariables, { testName, variables: [], bearerToken }];
+        });
+        enqueueSnackbar(`Bearer token captured from test: ${testName}`, { variant: 'success' });
+      }
+    };
+
+    window.addEventListener('bearer_token_updated', handleBearerTokenUpdate as EventListener);
+    return () => {
+      window.removeEventListener('bearer_token_updated', handleBearerTokenUpdate as EventListener);
+    };
+  }, [enqueueSnackbar]);
 
   const onSubmit = async (data: ConfigFormData) => {
     setIsSaving(true);
@@ -486,43 +616,94 @@ function ConfigurationPanel() {
             
             <Grid container spacing={3}>
               <Grid item xs={12}>
-                <Controller
-                  name="mfaEnabled"
-                  control={control}
-                  render={({ field }) => (
-                    <FormControlLabel
-                      control={
+                <FormControlLabel
+                  control={
+                    <Controller
+                      name="mfaEnabled"
+                      control={control}
+                      render={({ field }) => (
                         <Switch
                           checked={field.value}
-                          onChange={(e) => field.onChange(e.target.checked)}
-                          color="primary"
+                          onChange={field.onChange}
                         />
-                      }
-                      label={
-                        <Typography variant="body1" sx={{ fontWeight: 500 }}>
-                          Enable MFA Testing
-                        </Typography>
-                      }
+                      )}
                     />
-                  )}
+                  }
+                  label="Enable MFA"
                 />
               </Grid>
 
-              <Grid item xs={12}>
-                <Controller
-                  name="mfaSecretKey"
-                  control={control}
-                  render={({ field }) => (
-                    <TextField
-                      {...field}
-                      fullWidth
-                      label="MFA Secret Key"
-                      variant="outlined"
-                      sx={{ '& .MuiOutlinedInput-root': { borderRadius: 2 } }}
+              {watch('mfaEnabled') && (
+                <>
+                  <Grid item xs={12}>
+                    <Controller
+                      name="mfaSecretKey"
+                      control={control}
+                      render={({ field }) => (
+                        <TextField
+                          {...field}
+                          fullWidth
+                          label="MFA Secret Key"
+                          type="password"
+                          helperText="Enter your MFA secret key"
+                        />
+                      )}
                     />
-                  )}
-                />
-              </Grid>
+                  </Grid>
+                  
+                  <Grid item xs={12}>
+                    <TextField
+                      fullWidth
+                      label="Current TOTP Code"
+                      value={currentTotpCode}
+                      InputProps={{
+                        readOnly: true,
+                        endAdornment: (
+                          <IconButton
+                            onClick={() => {
+                              navigator.clipboard.writeText(currentTotpCode);
+                              enqueueSnackbar('TOTP code copied to clipboard', { variant: 'success' });
+                            }}
+                          >
+                            <ContentCopyIcon />
+                          </IconButton>
+                        )
+                      }}
+                      helperText="This code refreshes every 30 seconds"
+                    />
+                  </Grid>
+
+                  <Grid item xs={12}>
+                    <Controller
+                      name="cookies"
+                      control={control}
+                      render={({ field }) => (
+                        <TextField
+                          {...field}
+                          fullWidth
+                          label="Cookies"
+                          multiline
+                          rows={4}
+                          helperText="Cookies will be automatically captured after MFA login"
+                          InputProps={{
+                            readOnly: true,
+                            endAdornment: (
+                              <IconButton
+                                onClick={() => {
+                                  navigator.clipboard.writeText(field.value);
+                                  enqueueSnackbar('Cookies copied to clipboard', { variant: 'success' });
+                                }}
+                              >
+                                <ContentCopyIcon />
+                              </IconButton>
+                            )
+                          }}
+                        />
+                      )}
+                    />
+                  </Grid>
+                </>
+              )}
             </Grid>
           </CardContent>
         </Card>
@@ -658,6 +839,117 @@ function ConfigurationPanel() {
             </TableContainer>
           </CardContent>
         </Card>
+
+        {testCookies.length > 0 && (
+          <Card sx={{ mb: 4 }}>
+            <CardContent>
+              <Typography variant="h6" gutterBottom color="text.secondary">
+                Test Cookies
+              </Typography>
+              <Grid container spacing={3}>
+                {testCookies.map((testCookie) => (
+                  <Grid item xs={12} key={testCookie.testName}>
+                    <Accordion>
+                      <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+                        <Typography>{testCookie.testName}</Typography>
+                      </AccordionSummary>
+                      <AccordionDetails>
+                        <TableContainer component={Paper}>
+                          <Table size="small">
+                            <TableHead>
+                              <TableRow>
+                                <TableCell>Name</TableCell>
+                                <TableCell>Value</TableCell>
+                                <TableCell>Domain</TableCell>
+                                <TableCell>Path</TableCell>
+                                <TableCell>Expires</TableCell>
+                                <TableCell>Secure</TableCell>
+                                <TableCell>HttpOnly</TableCell>
+                              </TableRow>
+                            </TableHead>
+                            <TableBody>
+                              {testCookie.cookies.map((cookie, index) => (
+                                <TableRow key={index}>
+                                  <TableCell>{cookie.name}</TableCell>
+                                  <TableCell>
+                                    <Box sx={{ display: 'flex', alignItems: 'center' }}>
+                                      <Typography sx={{ fontFamily: 'monospace' }}>
+                                        {cookie.value}
+                                      </Typography>
+                                      <IconButton
+                                        size="small"
+                                        onClick={() => {
+                                          navigator.clipboard.writeText(cookie.value);
+                                          enqueueSnackbar('Cookie value copied to clipboard', { variant: 'success' });
+                                        }}
+                                      >
+                                        <ContentCopyIcon fontSize="small" />
+                                      </IconButton>
+                                    </Box>
+                                  </TableCell>
+                                  <TableCell>{cookie.domain}</TableCell>
+                                  <TableCell>{cookie.path}</TableCell>
+                                  <TableCell>{cookie.expires || '-'}</TableCell>
+                                  <TableCell>{cookie.secure ? 'Yes' : 'No'}</TableCell>
+                                  <TableCell>{cookie.httpOnly ? 'Yes' : 'No'}</TableCell>
+                                </TableRow>
+                              ))}
+                            </TableBody>
+                          </Table>
+                        </TableContainer>
+                      </AccordionDetails>
+                    </Accordion>
+                  </Grid>
+                ))}
+              </Grid>
+            </CardContent>
+          </Card>
+        )}
+
+        {testVariables.length > 0 && (
+          <Card sx={{ mb: 4 }}>
+            <CardContent>
+              <Typography variant="h6" gutterBottom color="text.secondary">
+                Test Variables
+              </Typography>
+              <Grid container spacing={3}>
+                {testVariables.map((testVar) => (
+                  <Grid item xs={12} key={testVar.testName}>
+                    <Accordion>
+                      <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+                        <Typography>{testVar.testName}</Typography>
+                      </AccordionSummary>
+                      <AccordionDetails>
+                        {testVar.bearerToken && (
+                          <Box sx={{ mb: 2 }}>
+                            <Typography variant="subtitle2" gutterBottom>
+                              Bearer Token
+                            </Typography>
+                            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                              <Typography sx={{ fontFamily: 'monospace' }}>
+                                {testVar.bearerToken}
+                              </Typography>
+                              <IconButton
+                                size="small"
+                                onClick={() => {
+                                  navigator.clipboard.writeText(testVar.bearerToken || '');
+                                  enqueueSnackbar('Bearer token copied to clipboard', { variant: 'success' });
+                                }}
+                              >
+                                <ContentCopyIcon fontSize="small" />
+                              </IconButton>
+                            </Box>
+                          </Box>
+                        )}
+                        {/* ... existing variables table ... */}
+                      </AccordionDetails>
+                    </Accordion>
+                  </Grid>
+                ))}
+              </Grid>
+            </CardContent>
+          </Card>
+        )}
 
         <Box sx={{ display: 'flex', justifyContent: 'flex-end' }}>
           <LoadingButton

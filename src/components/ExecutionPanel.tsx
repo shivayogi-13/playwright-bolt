@@ -31,6 +31,9 @@ import {
   TableContainer,
   TableHead,
   TableRow,
+  RadioGroup,
+  FormControlLabel,
+  Radio,
 } from '@mui/material';
 import { motion } from 'framer-motion';
 import { useSnackbar } from 'notistack';
@@ -79,6 +82,7 @@ interface TestStatus {
     passed: boolean;
     message: string;
   }[];
+  cookies?: string;
 }
 
 interface Variable {
@@ -88,9 +92,20 @@ interface Variable {
   timestamp: string;
 }
 
+interface Cookie {
+  name: string;
+  value: string;
+  domain: string;
+  path: string;
+  expires?: string;
+  secure: boolean;
+  httpOnly: boolean;
+}
+
 interface TestVariables {
   testName: string;
   variables: Variable[];
+  cookies?: Cookie[];
 }
 
 interface TestResult {
@@ -101,13 +116,24 @@ interface TestResult {
   timestamp: string;
 }
 
+interface TestVariable {
+  testName: string;
+  variables: Array<{
+    name: string;
+    value: string;
+    source: string;
+    timestamp: string;
+  }>;
+}
+
 const STORAGE_KEYS = {
   TEST_VARIABLES: 'test_automation_variables',
   TEST_STATUS: 'test_automation_status',
   SELECTED_TESTS: 'test_automation_selected_tests',
   SELECTED_SUITE: 'test_automation_selected_suite',
   API_REQUESTS: 'test_automation_api_requests',
-  TEST_LOGS: 'test_automation_logs'
+  TEST_LOGS: 'test_automation_logs',
+  CONFIG: 'test_automation_config'
 };
 
 const ajv = new Ajv();
@@ -124,6 +150,159 @@ function ExecutionPanel() {
   const [variablesExpanded, setVariablesExpanded] = useState(true);
   const [logs, setLogs] = useState<{ [key: string]: string[] }>({});
   const [testVariables, setTestVariables] = useState<TestVariables[]>([]);
+  const [authType, setAuthType] = useState<'mfa' | 'bearer'>('mfa');
+  const [mfaSecret, setMfaSecret] = useState('');
+  const [bearerToken, setBearerToken] = useState('');
+
+  // Load saved variables on mount and when storage changes
+  useEffect(() => {
+    const loadVariables = () => {
+      const savedVariables = localStorage.getItem(STORAGE_KEYS.TEST_VARIABLES);
+      if (savedVariables) {
+        try {
+          const parsedVariables = JSON.parse(savedVariables);
+          console.log('Loading saved variables:', parsedVariables);
+          setTestVariables(parsedVariables);
+        } catch (error) {
+          console.error('Error loading saved variables:', error);
+        }
+      }
+    };
+
+    // Load variables immediately
+    loadVariables();
+
+    // Add storage event listener
+    const handleStorageChange = (e: StorageEvent) => {
+      if (e.key === STORAGE_KEYS.TEST_VARIABLES) {
+        console.log('Storage event triggered for variables');
+        loadVariables();
+      }
+    };
+
+    window.addEventListener('storage', handleStorageChange);
+    return () => window.removeEventListener('storage', handleStorageChange);
+  }, []);
+
+  // Save variables when they change
+  useEffect(() => {
+    if (testVariables.length > 0) {
+      console.log('Saving variables:', testVariables);
+      localStorage.setItem(STORAGE_KEYS.TEST_VARIABLES, JSON.stringify(testVariables));
+    }
+  }, [testVariables]);
+
+  // Load saved logs on mount
+  useEffect(() => {
+    const loadLogs = () => {
+      const savedLogs = localStorage.getItem(STORAGE_KEYS.TEST_LOGS);
+      if (savedLogs) {
+        try {
+          const parsedLogs = JSON.parse(savedLogs);
+          console.log('Loading saved logs:', parsedLogs);
+          setLogs(parsedLogs);
+        } catch (error) {
+          console.error('Error loading saved logs:', error);
+        }
+      }
+    };
+
+    // Load logs immediately
+    loadLogs();
+
+    // Add storage event listener
+    const handleStorageChange = (e: StorageEvent) => {
+      if (e.key === STORAGE_KEYS.TEST_LOGS) {
+        console.log('Storage event triggered for logs');
+        loadLogs();
+      }
+    };
+
+    window.addEventListener('storage', handleStorageChange);
+    return () => window.removeEventListener('storage', handleStorageChange);
+  }, []);
+
+  // Save logs when they change
+  useEffect(() => {
+    if (Object.keys(logs).length > 0) {
+      console.log('Saving logs:', logs);
+      localStorage.setItem(STORAGE_KEYS.TEST_LOGS, JSON.stringify(logs));
+    }
+  }, [logs]);
+
+  // Load saved test status and logs on mount
+  useEffect(() => {
+    const loadTestStatus = () => {
+      const savedStatus = localStorage.getItem(STORAGE_KEYS.TEST_STATUS);
+      if (savedStatus) {
+        try {
+          const parsedStatus = JSON.parse(savedStatus);
+          console.log('Loading saved test status:', parsedStatus);
+          // Ensure isExpanded is preserved
+          const testsWithExpanded = parsedStatus.map((test: TestStatus) => ({
+            ...test,
+            isExpanded: test.isExpanded || false
+          }));
+          setTests(testsWithExpanded);
+        } catch (error) {
+          console.error('Error loading saved test status:', error);
+        }
+      }
+    };
+
+    // Load test status immediately
+    loadTestStatus();
+
+    // Add storage event listener
+    const handleStorageChange = (e: StorageEvent) => {
+      if (e.key === STORAGE_KEYS.TEST_STATUS) {
+        console.log('Storage event triggered for test status');
+        loadTestStatus();
+      }
+    };
+
+    window.addEventListener('storage', handleStorageChange);
+    return () => window.removeEventListener('storage', handleStorageChange);
+  }, []);
+
+  // Save test status when it changes
+  useEffect(() => {
+    if (tests.length > 0) {
+      console.log('Saving test status:', tests);
+      // Ensure we save the expanded state
+      const testsToSave = tests.map(test => ({
+        ...test,
+        isExpanded: test.isExpanded || false
+      }));
+      localStorage.setItem(STORAGE_KEYS.TEST_STATUS, JSON.stringify(testsToSave));
+    }
+  }, [tests]);
+
+  // Load MFA configuration on mount
+  useEffect(() => {
+    const loadMfaConfig = () => {
+      const savedConfig = localStorage.getItem(STORAGE_KEYS.CONFIG);
+      if (savedConfig) {
+        try {
+          const config = JSON.parse(savedConfig);
+        } catch (error) {
+          console.error('Error loading MFA configuration:', error);
+        }
+      }
+    };
+
+    loadMfaConfig();
+
+    // Listen for configuration changes
+    const handleStorageChange = (e: StorageEvent) => {
+      if (e.key === STORAGE_KEYS.CONFIG) {
+        loadMfaConfig();
+      }
+    };
+
+    window.addEventListener('storage', handleStorageChange);
+    return () => window.removeEventListener('storage', handleStorageChange);
+  }, []);
 
   const loadTests = () => {
     try {
@@ -150,7 +329,8 @@ function ExecutionPanel() {
               headers: request.headers,
               body: request.body,
               expectedStatus: request.expectedStatus,
-              assertions: request.assertions || []
+              assertions: request.assertions || [],
+              suite: request.suite || 'default'
             };
           }
           
@@ -158,7 +338,7 @@ function ExecutionPanel() {
             name: request.name,
             status: 'pending' as const,
             duration: 0,
-            suite: request.suite,
+            suite: request.suite || 'default',
             logs: '',
             method: request.method,
             endpoint: request.endpoint,
@@ -171,7 +351,12 @@ function ExecutionPanel() {
         });
         
         setTests(newTests);
-        enqueueSnackbar('Tests loaded successfully', { variant: 'success' });
+        // Only show toast if there are tests loaded
+        if (newTests.length > 0) {
+          enqueueSnackbar('Tests loaded successfully', { variant: 'success' });
+        } else {
+          enqueueSnackbar('No tests found', { variant: 'info' });
+        }
       } else {
         setTests([]);
         enqueueSnackbar('No tests found', { variant: 'info' });
@@ -182,105 +367,55 @@ function ExecutionPanel() {
     }
   };
 
-  // Load saved data and tests on component mount
+  // Initialize component
   useEffect(() => {
-    const loadSavedData = () => {
-      try {
-        const savedVariables = localStorage.getItem(STORAGE_KEYS.TEST_VARIABLES);
-        const savedRequests = localStorage.getItem(STORAGE_KEYS.API_REQUESTS);
-        const savedStatus = localStorage.getItem(STORAGE_KEYS.TEST_STATUS);
-        const savedSelectedTests = localStorage.getItem(STORAGE_KEYS.SELECTED_TESTS);
-        const savedSelectedSuite = localStorage.getItem(STORAGE_KEYS.SELECTED_SUITE);
-        const savedLogs = localStorage.getItem(STORAGE_KEYS.TEST_LOGS);
+    // Load tests on mount
+    loadTests();
 
-        if (savedVariables) {
-          setTestVariables(JSON.parse(savedVariables));
-        }
+    // Load saved selected tests and suite
+    const savedSelectedTests = localStorage.getItem(STORAGE_KEYS.SELECTED_TESTS);
+    if (savedSelectedTests) {
+      setSelectedTests(JSON.parse(savedSelectedTests));
+    }
 
-        // Load and merge API requests with test status
-        if (savedRequests) {
-          const requests: ApiRequest[] = JSON.parse(savedRequests);
-          const status: TestStatus[] = savedStatus ? JSON.parse(savedStatus) : [];
-          
-          // Create a map of existing test statuses
-          const existingTests = new Map(
-            status.map((test: TestStatus) => [test.name, test])
-          );
-          
-          // Create new tests array with both existing and new tests
-          const newTests: TestStatus[] = requests.map(request => {
-            const existingTest = existingTests.get(request.name);
-            if (existingTest) {
-              return {
-                ...existingTest,
-                method: request.method,
-                endpoint: request.endpoint,
-                headers: request.headers,
-                body: request.body,
-                expectedStatus: request.expectedStatus,
-                assertions: request.assertions || []
-              };
-            }
-            
-            return {
-              name: request.name,
-              status: 'pending' as const,
-              duration: 0,
-              suite: request.suite,
-              logs: '',
-              method: request.method,
-              endpoint: request.endpoint,
-              headers: request.headers,
-              body: request.body,
-              expectedStatus: request.expectedStatus,
-              isExpanded: false,
-              assertions: request.assertions || []
-            };
-          });
-          
-          setTests(newTests);
-        }
+    const savedSelectedSuite = localStorage.getItem(STORAGE_KEYS.SELECTED_SUITE);
+    if (savedSelectedSuite) {
+      setSelectedSuite(savedSelectedSuite);
+    }
 
-        if (savedSelectedTests) {
-          setSelectedTests(JSON.parse(savedSelectedTests));
-        }
-        if (savedSelectedSuite) {
-          setSelectedSuite(savedSelectedSuite);
-        }
-        if (savedLogs) {
-          setLogs(JSON.parse(savedLogs));
-        }
-      } catch (error) {
-        console.error('Error loading saved data:', error);
-        enqueueSnackbar('Error loading saved data', { variant: 'error' });
-      }
-    };
-
-    loadSavedData();
-
-    // Add a listener for storage events to update when API requests change
+    // Add event listeners for storage changes
     const handleStorageChange = (e: StorageEvent) => {
-      if (e.key === STORAGE_KEYS.API_REQUESTS && e.newValue) {
-        loadSavedData();
+      if (e.key === STORAGE_KEYS.API_REQUESTS) {
+        loadTests();
       }
     };
-
+    
     window.addEventListener('storage', handleStorageChange);
     return () => window.removeEventListener('storage', handleStorageChange);
   }, []);
 
-  // Save data whenever it changes
+  // Add a message event listener for cross-tab communication
   useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEYS.TEST_VARIABLES, JSON.stringify(testVariables));
-      localStorage.setItem(STORAGE_KEYS.TEST_STATUS, JSON.stringify(tests));
-      localStorage.setItem(STORAGE_KEYS.SELECTED_TESTS, JSON.stringify(selectedTests));
-      localStorage.setItem(STORAGE_KEYS.SELECTED_SUITE, selectedSuite);
-      localStorage.setItem(STORAGE_KEYS.TEST_LOGS, JSON.stringify(logs));
-    } catch (error) {
-      console.error('Error saving data:', error);
-    }
-  }, [testVariables, tests, selectedTests, selectedSuite, logs]);
+    const handleMessage = (event: MessageEvent) => {
+      if (event.data && event.data.type === 'RELOAD_TESTS') {
+        loadTests();
+      }
+    };
+
+    window.addEventListener('message', handleMessage);
+    return () => window.removeEventListener('message', handleMessage);
+  }, []);
+
+  // Save selected tests and suite when they change
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEYS.SELECTED_TESTS, JSON.stringify(selectedTests));
+    localStorage.setItem(STORAGE_KEYS.SELECTED_SUITE, selectedSuite);
+  }, [selectedTests, selectedSuite]);
+
+  // Save test status when it changes
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEYS.TEST_STATUS, JSON.stringify(tests));
+  }, [tests]);
 
   const extractVariablesFromResponse = (testName: string, response: any) => {
     try {
@@ -323,9 +458,11 @@ function ExecutionPanel() {
   };
 
   const clearVariables = () => {
-    setTestVariables([]);
-    localStorage.removeItem(STORAGE_KEYS.TEST_VARIABLES);
-    enqueueSnackbar('Variables cleared', { variant: 'info' });
+    if (window.confirm('Are you sure you want to clear all variables? This action cannot be undone.')) {
+      setTestVariables([]);
+      localStorage.removeItem(STORAGE_KEYS.TEST_VARIABLES);
+      enqueueSnackbar('Variables cleared', { variant: 'info' });
+    }
   };
 
   const validateAssertions = async (response: any, assertions: Assertion[]): Promise<TestStatus['assertionResults']> => {
@@ -419,6 +556,28 @@ function ExecutionPanel() {
       return;
     }
 
+    // Clear previous test results, variables, and logs
+    setTests(prevTests =>
+      prevTests.map(test => ({
+        ...test,
+        status: 'pending',
+        duration: 0,
+        logs: '',
+        assertionResults: undefined,
+        isExpanded: false
+      }))
+    );
+
+    // Clear variables before starting new execution
+    setTestVariables([]);
+    localStorage.removeItem(STORAGE_KEYS.TEST_VARIABLES);
+    enqueueSnackbar('Variables cleared before test execution', { variant: 'info' });
+
+    // Clear logs before starting new execution
+    setLogs({});
+    localStorage.removeItem(STORAGE_KEYS.TEST_LOGS);
+    enqueueSnackbar('Logs cleared before test execution', { variant: 'info' });
+
     setIsRunning(true);
     setProgress(0);
 
@@ -435,6 +594,7 @@ function ExecutionPanel() {
         );
 
         const startTime = Date.now();
+        
         const response = await fetch(test.endpoint, {
           method: test.method,
           headers: JSON.parse(test.headers || '{}'),
@@ -465,38 +625,37 @@ function ExecutionPanel() {
         const assertionResults = test.assertions ? await validateAssertions(responseData, test.assertions) : undefined;
         const allAssertionsPassed = assertionResults ? assertionResults.every(a => a.passed) : true;
 
-        // Format detailed logs
+        const testStatus = response.status === test.expectedStatus && allAssertionsPassed ? 'passed' : 'failed';
+        
+        // Create formatted logs
         const formattedLogs = [
           `Test: ${test.name}`,
-          `Status: ${response.status === test.expectedStatus && allAssertionsPassed ? 'PASSED' : 'FAILED'}`,
+          `Status: ${testStatus.toUpperCase()}`,
           `Duration: ${duration}ms`,
-          `\nRequest Details:`,
-          `Method: ${test.method}`,
-          `Endpoint: ${test.endpoint}`,
-          `Headers: ${test.headers}`,
-          `Body: ${test.body}`,
-          `\nResponse Details:`,
-          `Status Code: ${response.status}`,
-          `Expected Status: ${test.expectedStatus}`,
-          `Response Body: ${JSON.stringify(responseData, null, 2)}`,
+          `Request Details:`,
+          `  Method: ${test.method}`,
+          `  Endpoint: ${test.endpoint}`,
+          `  Headers: ${JSON.stringify(JSON.parse(test.headers || '{}'), null, 2)}`,
+          `  Body: ${test.body || 'None'}`,
+          `Response Details:`,
+          `  Status: ${response.status}`,
+          `  Expected Status: ${test.expectedStatus}`,
+          `  Body: ${JSON.stringify(responseData, null, 2)}`,
         ];
 
-        if (assertionResults && assertionResults.length > 0) {
-          formattedLogs.push('\nAssertion Results:');
-          assertionResults.forEach((result, index) => {
+        if (assertionResults) {
+          formattedLogs.push('Assertion Results:');
+          assertionResults.forEach(result => {
             formattedLogs.push(
-              `\nAssertion ${index + 1}:`,
-              `Field: ${result.field}`,
-              `Status: ${result.passed ? '✓ PASSED' : '✗ FAILED'}`,
-              `Expected: ${result.expected}`,
-              `Actual: ${JSON.stringify(result.actual)}`,
-              `Message: ${result.message}`
+              `Assertion: ${result.field}`,
+              `  Expected: ${result.expected}`,
+              `  Actual: ${result.actual}`,
+              `  Status: ${result.passed ? 'PASSED' : 'FAILED'}`,
+              `  Message: ${result.message}`
             );
           });
         }
 
-        const testStatus = response.status === test.expectedStatus && allAssertionsPassed ? 'passed' : 'failed';
-        
         // Update test status and logs
         setTests(prevTests =>
           prevTests.map(t =>
@@ -512,18 +671,32 @@ function ExecutionPanel() {
           )
         );
 
-        // Save test result
+        // Save logs to state and localStorage
+        setLogs(prevLogs => ({
+          ...prevLogs,
+          [test.name]: formattedLogs
+        }));
+
+        // Save test result with all required fields
         const testResult = {
           name: test.name,
           status: testStatus,
           duration,
-          suite: test.suite,
-          timestamp: new Date().toISOString()
+          suite: test.suite || 'default',
+          timestamp: new Date().toISOString(),
+          method: test.method,
+          endpoint: test.endpoint,
+          expectedStatus: test.expectedStatus,
+          actualStatus: response.status,
+          assertions: test.assertions,
+          assertionResults,
+          logs: formattedLogs.join('\n')
         };
 
         // Update results in localStorage
         const savedResults = localStorage.getItem('test_automation_results');
         const results = savedResults ? JSON.parse(savedResults) : [];
+        
         const existingResultIndex = results.findIndex((r: TestResult) => r.name === test.name);
         
         if (existingResultIndex >= 0) {
@@ -532,32 +705,123 @@ function ExecutionPanel() {
           results.push(testResult);
         }
         
+        // Save to localStorage and trigger storage event
         localStorage.setItem('test_automation_results', JSON.stringify(results));
+        
+        // Manually dispatch storage event to notify other components
+        window.dispatchEvent(new StorageEvent('storage', {
+          key: 'test_automation_results',
+          newValue: JSON.stringify(results),
+          oldValue: savedResults,
+          storageArea: localStorage
+        }));
+
+        // Capture cookies from response
+        const cookies = response.headers.get('set-cookie');
+        if (cookies) {
+          // Update test status with cookies
+          setTests(prevTests => 
+            prevTests.map(t => 
+              t.name === test.name 
+                ? { ...t, cookies } 
+                : t
+            )
+          );
+
+          // Save cookies to configuration if MFA is enabled
+          if (authType === 'mfa') {
+            localStorage.setItem('mfa_cookies', cookies);
+            // Notify configuration panel about new cookies
+            window.dispatchEvent(new CustomEvent('mfa_cookies_updated', { detail: cookies }));
+          }
+        }
+
+        // Extract Bearer token from response headers
+        const authHeader = response.headers.get('authorization');
+        if (authHeader && authHeader.startsWith('Bearer ')) {
+          const bearerToken = authHeader.substring(7); // Remove 'Bearer ' prefix
+          
+          // Update test variables with Bearer token
+          setTestVariables(prevVariables => {
+            const existingTestIndex = prevVariables.findIndex(v => v.testName === test.name);
+            if (existingTestIndex >= 0) {
+              const updated = [...prevVariables];
+              updated[existingTestIndex] = { ...updated[existingTestIndex], bearerToken };
+              return updated;
+            }
+            return [...prevVariables, { testName: test.name, variables: [], bearerToken }];
+          });
+
+          // Save Bearer token to localStorage
+          const savedTokens = localStorage.getItem('test_bearer_tokens');
+          const tokens = savedTokens ? JSON.parse(savedTokens) : {};
+          tokens[test.name] = bearerToken;
+          localStorage.setItem('test_bearer_tokens', JSON.stringify(tokens));
+
+          // Notify about new Bearer token
+          window.dispatchEvent(new CustomEvent('bearer_token_updated', { 
+            detail: { testName: test.name, bearerToken } 
+          }));
+        }
 
       } catch (error) {
+        console.error('Error running test:', error);
+        const errorLogs = [
+          `Test: ${test.name}`,
+          `Status: FAILED`,
+          `Error: ${error instanceof Error ? error.message : String(error)}`,
+          `Request Details:`,
+          `  Method: ${test.method}`,
+          `  Endpoint: ${test.endpoint}`,
+          `  Headers: ${(() => {
+            try {
+              const requestHeaders = JSON.parse(test.headers || '{}');
+              return JSON.stringify(requestHeaders, null, 2);
+            } catch (e) {
+              return test.headers || '{}';
+            }
+          })()}`,
+          `  Body: ${test.body || 'None'}`
+        ].join('\n');
+
         setTests(prevTests =>
           prevTests.map(t =>
             t.name === test.name
               ? {
                   ...t,
                   status: 'failed',
-                  logs: `Error: ${error instanceof Error ? error.message : String(error)}`,
+                  logs: errorLogs
                 }
               : t
           )
         );
 
-        // Save failed test result
+        // Save error logs to state and localStorage
+        setLogs(prevLogs => ({
+          ...prevLogs,
+          [test.name]: errorLogs.split('\n')
+        }));
+
+        // Save failed test result with all required fields
         const testResult = {
           name: test.name,
           status: 'failed',
           duration: 0,
-          suite: test.suite,
-          timestamp: new Date().toISOString()
+          suite: test.suite || 'default',
+          timestamp: new Date().toISOString(),
+          method: test.method,
+          endpoint: test.endpoint,
+          expectedStatus: test.expectedStatus,
+          actualStatus: 0,
+          assertions: test.assertions,
+          assertionResults: [],
+          logs: errorLogs
         };
 
+        // Update results in localStorage
         const savedResults = localStorage.getItem('test_automation_results');
         const results = savedResults ? JSON.parse(savedResults) : [];
+        
         const existingResultIndex = results.findIndex((r: TestResult) => r.name === test.name);
         
         if (existingResultIndex >= 0) {
@@ -566,7 +830,16 @@ function ExecutionPanel() {
           results.push(testResult);
         }
         
+        // Save to localStorage and trigger storage event
         localStorage.setItem('test_automation_results', JSON.stringify(results));
+        
+        // Manually dispatch storage event to notify other components
+        window.dispatchEvent(new StorageEvent('storage', {
+          key: 'test_automation_results',
+          newValue: JSON.stringify(results),
+          oldValue: savedResults,
+          storageArea: localStorage
+        }));
       }
 
       completedTests++;
@@ -676,31 +949,39 @@ function ExecutionPanel() {
           : test
       )
     );
+
+    // Save test status with expanded state
+    const updatedTests = tests.map(test => 
+      test.name === testName 
+        ? { ...test, isExpanded: !test.isExpanded }
+        : test
+    );
+    localStorage.setItem(STORAGE_KEYS.TEST_STATUS, JSON.stringify(updatedTests));
   };
 
   const toggleAllExpand = () => {
     setAllExpanded(!allExpanded);
-    setTests(prevTests => 
-      prevTests.map(test => ({
-        ...test,
-        isExpanded: !allExpanded
-      }))
-    );
+    const updatedTests = tests.map(test => ({
+      ...test,
+      isExpanded: !allExpanded
+    }));
+    setTests(updatedTests as TestStatus[]);
+    localStorage.setItem(STORAGE_KEYS.TEST_STATUS, JSON.stringify(updatedTests));
   };
 
   const clearAllLogs = () => {
-    setTests(prevTests => 
-      prevTests.map(test => ({
-        ...test,
-        logs: '',
-        status: 'pending',
-        duration: 0,
-        assertionResults: undefined
-      }))
-    );
+    const updatedTests = tests.map(test => ({
+      ...test,
+      logs: '',
+      status: 'pending' as const,
+      duration: 0,
+      assertionResults: undefined,
+      isExpanded: false
+    }));
+    setTests(updatedTests as TestStatus[]);
     setLogs({});
+    localStorage.setItem(STORAGE_KEYS.TEST_STATUS, JSON.stringify(updatedTests));
     localStorage.removeItem(STORAGE_KEYS.TEST_LOGS);
-    localStorage.removeItem(STORAGE_KEYS.TEST_STATUS);
     enqueueSnackbar('All logs cleared', { variant: 'info' });
   };
 
