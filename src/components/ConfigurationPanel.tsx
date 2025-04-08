@@ -33,6 +33,7 @@ import {
   Accordion,
   AccordionSummary,
   AccordionDetails,
+  CircularProgress,
 } from '@mui/material';
 import { LoadingButton } from '@mui/lab';
 import { useForm, Controller } from 'react-hook-form';
@@ -51,6 +52,7 @@ import AddCircleOutlineIcon from '@mui/icons-material/AddCircleOutline';
 import * as XLSX from 'xlsx';
 import { TOTP } from 'otpauth';
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
+import { authenticator } from 'otplib';
 
 interface Assertion {
   field: string;
@@ -124,13 +126,6 @@ interface TestCookies {
   cookies: Cookie[];
 }
 
-interface TestVariables {
-  testName: string;
-  variables: Variable[];
-  cookies?: Cookie[];
-  bearerToken?: string;
-}
-
 const defaultApiRequest: ApiRequest = {
   name: '',
   method: 'GET',
@@ -155,6 +150,11 @@ export const TEST_SUITES = {
   PERFORMANCE: 'performance',
 };
 
+const isValidBase32 = (str: string) => {
+  const base32Regex = /^[A-Z2-7]+=*$/;
+  return base32Regex.test(str.toUpperCase());
+};
+
 function ConfigurationPanel() {
   const { enqueueSnackbar } = useSnackbar();
   const [isSaving, setIsSaving] = useState(false);
@@ -167,7 +167,8 @@ function ConfigurationPanel() {
   const [currentTotpCode, setCurrentTotpCode] = useState<string>('');
   const [lastGenerated, setLastGenerated] = useState<number>(0);
   const [testCookies, setTestCookies] = useState<TestCookies[]>([]);
-  const [testVariables, setTestVariables] = useState<TestVariables[]>([]);
+  const [remainingTime, setRemainingTime] = useState<number>(30);
+  const [mfaSecretError, setMfaSecretError] = useState<string>('');
 
   const { control, handleSubmit, watch, reset } = useForm<ConfigFormData>({
     defaultValues: {
@@ -206,57 +207,84 @@ function ConfigurationPanel() {
     loadSavedData();
   }, [reset, enqueueSnackbar]);
 
-  // Generate TOTP code every 30 seconds
+  // Update TOTP generation effect
   useEffect(() => {
-    const generateTotpCode = () => {
-      const mfaSecretKey = watch('mfaSecretKey');
-      const mfaEnabled = watch('mfaEnabled');
-      
-      if (mfaEnabled && mfaSecretKey) {
-        const now = Date.now();
-        if (now - lastGenerated >= 30000) { // 30 seconds
-          try {
-            const totp = new TOTP({
-              secret: mfaSecretKey,
-              algorithm: 'SHA1',
-              digits: 6,
-              period: 30
-            });
-            const code = totp.generate();
-            setCurrentTotpCode(code);
-            setLastGenerated(now);
-          } catch (error) {
-            console.error('Error generating TOTP:', error);
-          }
-        }
-      }
-    };
+    const mfaSecret = watch('mfaSecretKey');
+    console.log('MFA Secret changed:', mfaSecret); // Debug log
 
-    const interval = setInterval(generateTotpCode, 1000);
-    return () => clearInterval(interval);
-  }, [watch, lastGenerated]);
+    if (!mfaSecret) {
+      console.log('No MFA secret provided'); // Debug log
+      setCurrentTotpCode('');
+      return;
+    }
+
+    try {
+      // Configure authenticator with basic settings
+      authenticator.options = {
+        window: 0,
+        step: 30,
+        digits: 6
+      };
+      console.log('Authenticator configured with options:', authenticator.options); // Debug log
+
+      // Generate TOTP directly with the secret
+      const totp = authenticator.generate(mfaSecret);
+      console.log('Successfully generated TOTP:', totp); // Debug log
+      setCurrentTotpCode(totp);
+      setLastGenerated(Date.now());
+
+      // Set up timer for regeneration
+      const interval = setInterval(() => {
+        const newTotp = authenticator.generate(mfaSecret);
+        console.log('Regenerated new TOTP:', newTotp); // Debug log
+        setCurrentTotpCode(newTotp);
+        setLastGenerated(Date.now());
+      }, 30000);
+
+      return () => clearInterval(interval);
+    } catch (error) {
+      console.error('Failed to generate TOTP:', error); // Error log
+      setCurrentTotpCode('');
+      setMfaSecretError('Failed to generate TOTP code');
+    }
+  }, [watch('mfaSecretKey')]);
+
+  // Add effect to clear error when secret changes
+  useEffect(() => {
+    setMfaSecretError('');
+  }, [watch('mfaSecretKey')]);
+
+  // Add remaining time display
+  useEffect(() => {
+    const timer = setInterval(() => {
+      const elapsed = Math.floor((Date.now() - lastGenerated) / 1000);
+      const remaining = 30 - (elapsed % 30);
+      setRemainingTime(remaining);
+    }, 1000);
+
+    return () => clearInterval(timer);
+  }, [lastGenerated]);
 
   // Listen for cookie updates from ExecutionPanel
   useEffect(() => {
-    const handleCookieUpdate = (event: CustomEvent) => {
-      const { testName, cookies } = event.detail;
-      if (cookies && cookies.length > 0) {
-        setTestCookies(prevCookies => {
-          const existingTestIndex = prevCookies.findIndex(tc => tc.testName === testName);
-          if (existingTestIndex >= 0) {
-            const updated = [...prevCookies];
-            updated[existingTestIndex] = { testName, cookies };
-            return updated;
-          }
-          return [...prevCookies, { testName, cookies }];
-        });
-        enqueueSnackbar(`New cookies captured from test: ${testName}`, { variant: 'success' });
-      }
+    const handleCookieUpdate = (event: CustomEvent<string>) => {
+      const cookies = event.detail;
+      setTestCookies(prevCookies => {
+        const updatedCookies = [...prevCookies];
+        const existingIndex = updatedCookies.findIndex(tc => tc.testName === 'mfa');
+        if (existingIndex >= 0) {
+          updatedCookies[existingIndex] = { testName: 'mfa', cookies };
+        } else {
+          updatedCookies.push({ testName: 'mfa', cookies });
+        }
+        return updatedCookies;
+      });
+      enqueueSnackbar('MFA cookies updated', { variant: 'success' });
     };
 
-    window.addEventListener('test_cookies_updated', handleCookieUpdate as EventListener);
+    window.addEventListener('mfa_cookies_updated', handleCookieUpdate as EventListener);
     return () => {
-      window.removeEventListener('test_cookies_updated', handleCookieUpdate as EventListener);
+      window.removeEventListener('mfa_cookies_updated', handleCookieUpdate as EventListener);
     };
   }, [enqueueSnackbar]);
 
@@ -276,30 +304,6 @@ function ConfigurationPanel() {
       }
     }
   }, []);
-
-  // Listen for Bearer token updates
-  useEffect(() => {
-    const handleBearerTokenUpdate = (event: CustomEvent) => {
-      const { testName, bearerToken } = event.detail;
-      if (bearerToken) {
-        setTestVariables(prevVariables => {
-          const existingTestIndex = prevVariables.findIndex(v => v.testName === testName);
-          if (existingTestIndex >= 0) {
-            const updated = [...prevVariables];
-            updated[existingTestIndex] = { ...updated[existingTestIndex], bearerToken };
-            return updated;
-          }
-          return [...prevVariables, { testName, variables: [], bearerToken }];
-        });
-        enqueueSnackbar(`Bearer token captured from test: ${testName}`, { variant: 'success' });
-      }
-    };
-
-    window.addEventListener('bearer_token_updated', handleBearerTokenUpdate as EventListener);
-    return () => {
-      window.removeEventListener('bearer_token_updated', handleBearerTokenUpdate as EventListener);
-    };
-  }, [enqueueSnackbar]);
 
   const onSubmit = async (data: ConfigFormData) => {
     setIsSaving(true);
@@ -337,6 +341,11 @@ function ConfigurationPanel() {
     setIsEditing(true);
     setEditIndex(index);
     setIsApiDialogOpen(true);
+
+    // Dispatch event to notify other components
+    window.dispatchEvent(new CustomEvent('test_request_edit', {
+      detail: { name: requestToEdit.name }
+    }));
   };
 
   const handleApiRequestSave = () => {
@@ -384,7 +393,9 @@ function ConfigurationPanel() {
           requests.push(newRequest);
         }
 
+        // Update both localStorage and state
         localStorage.setItem(STORAGE_KEYS.API_REQUESTS, JSON.stringify(requests));
+        setApiRequests(requests);
 
         // Also update test status if it exists
         const savedStatus = localStorage.getItem(STORAGE_KEYS.TEST_STATUS);
@@ -640,38 +651,59 @@ function ConfigurationPanel() {
                       name="mfaSecretKey"
                       control={control}
                       render={({ field }) => (
-                        <TextField
-                          {...field}
-                          fullWidth
-                          label="MFA Secret Key"
-                          type="password"
-                          helperText="Enter your MFA secret key"
-                        />
+                        <Box sx={{ display: 'flex', alignItems: 'center' }}>
+                          <TextField
+                            {...field}
+                            fullWidth
+                            label="MFA Secret Key"
+                            type="password"
+                            variant="outlined"
+                            helperText="Enter your MFA secret key"
+                            sx={{ '& .MuiOutlinedInput-root': { borderRadius: 2 } }}
+                          />
+                          <Tooltip title="Your MFA secret key for generating TOTP codes">
+                            <IconButton sx={{ ml: 1 }}>
+                              <HelpOutlineIcon />
+                            </IconButton>
+                          </Tooltip>
+                        </Box>
                       )}
                     />
                   </Grid>
                   
-                  <Grid item xs={12}>
-                    <TextField
-                      fullWidth
-                      label="Current TOTP Code"
-                      value={currentTotpCode}
-                      InputProps={{
-                        readOnly: true,
-                        endAdornment: (
-                          <IconButton
-                            onClick={() => {
-                              navigator.clipboard.writeText(currentTotpCode);
-                              enqueueSnackbar('TOTP code copied to clipboard', { variant: 'success' });
-                            }}
-                          >
-                            <ContentCopyIcon />
-                          </IconButton>
-                        )
-                      }}
-                      helperText="This code refreshes every 30 seconds"
-                    />
-                  </Grid>
+                  {watch('mfaSecretKey') && (
+                    <Grid item xs={12}>
+                      <Card variant="outlined">
+                        <CardContent>
+                          <Typography variant="h6" gutterBottom>
+                            Current TOTP Code
+                          </Typography>
+                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+                            <Typography variant="h4" sx={{ fontFamily: 'monospace' }}>
+                              {currentTotpCode}
+                            </Typography>
+                            <IconButton
+                              onClick={() => {
+                                navigator.clipboard.writeText(currentTotpCode);
+                                enqueueSnackbar('TOTP code copied to clipboard', { variant: 'success' });
+                              }}
+                            >
+                              <ContentCopyIcon />
+                            </IconButton>
+                            <CircularProgress
+                              variant="determinate"
+                              value={(remainingTime / 30) * 100}
+                              size={24}
+                              sx={{ ml: 'auto' }}
+                            />
+                            <Typography variant="body2" color="text.secondary">
+                              {remainingTime}s
+                            </Typography>
+                          </Box>
+                        </CardContent>
+                      </Card>
+                    </Grid>
+                  )}
 
                   <Grid item xs={12}>
                     <Controller
@@ -897,51 +929,6 @@ function ConfigurationPanel() {
                             </TableBody>
                           </Table>
                         </TableContainer>
-                      </AccordionDetails>
-                    </Accordion>
-                  </Grid>
-                ))}
-              </Grid>
-            </CardContent>
-          </Card>
-        )}
-
-        {testVariables.length > 0 && (
-          <Card sx={{ mb: 4 }}>
-            <CardContent>
-              <Typography variant="h6" gutterBottom color="text.secondary">
-                Test Variables
-              </Typography>
-              <Grid container spacing={3}>
-                {testVariables.map((testVar) => (
-                  <Grid item xs={12} key={testVar.testName}>
-                    <Accordion>
-                      <AccordionSummary expandIcon={<ExpandMoreIcon />}>
-                        <Typography>{testVar.testName}</Typography>
-                      </AccordionSummary>
-                      <AccordionDetails>
-                        {testVar.bearerToken && (
-                          <Box sx={{ mb: 2 }}>
-                            <Typography variant="subtitle2" gutterBottom>
-                              Bearer Token
-                            </Typography>
-                            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                              <Typography sx={{ fontFamily: 'monospace' }}>
-                                {testVar.bearerToken}
-                              </Typography>
-                              <IconButton
-                                size="small"
-                                onClick={() => {
-                                  navigator.clipboard.writeText(testVar.bearerToken || '');
-                                  enqueueSnackbar('Bearer token copied to clipboard', { variant: 'success' });
-                                }}
-                              >
-                                <ContentCopyIcon fontSize="small" />
-                              </IconButton>
-                            </Box>
-                          </Box>
-                        )}
-                        {/* ... existing variables table ... */}
                       </AccordionDetails>
                     </Accordion>
                   </Grid>

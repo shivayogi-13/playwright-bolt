@@ -595,13 +595,35 @@ function ExecutionPanel() {
 
         const startTime = Date.now();
         
+        // Parse headers and ensure Content-Type is set for requests with body
+        const headers = JSON.parse(test.headers || '{}');
+        if (test.method !== 'GET' && test.body) {
+          headers['Content-Type'] = headers['Content-Type'] || 'application/json';
+        }
+
         const response = await fetch(test.endpoint, {
           method: test.method,
-          headers: JSON.parse(test.headers || '{}'),
-          body: test.method !== 'GET' ? test.body : undefined,
+          headers: headers,
+          body: test.method !== 'GET' && test.body ? 
+            (headers['Content-Type']?.includes('application/json') ? 
+              JSON.stringify(JSON.parse(test.body)) : 
+              test.body) : 
+            undefined,
         });
 
-        const responseData = await response.json();
+        let responseData = {};
+        const contentType = response.headers.get('content-type');
+        if (contentType && contentType.includes('application/json')) {
+          try {
+            responseData = await response.json();
+          } catch (error) {
+            // If JSON parsing fails, use empty object for DELETE requests
+            if (test.method !== 'DELETE') {
+              throw error;
+            }
+          }
+        }
+
         const duration = Date.now() - startTime;
 
         // Extract and store variables from response
@@ -734,34 +756,6 @@ function ExecutionPanel() {
             // Notify configuration panel about new cookies
             window.dispatchEvent(new CustomEvent('mfa_cookies_updated', { detail: cookies }));
           }
-        }
-
-        // Extract Bearer token from response headers
-        const authHeader = response.headers.get('authorization');
-        if (authHeader && authHeader.startsWith('Bearer ')) {
-          const bearerToken = authHeader.substring(7); // Remove 'Bearer ' prefix
-          
-          // Update test variables with Bearer token
-          setTestVariables(prevVariables => {
-            const existingTestIndex = prevVariables.findIndex(v => v.testName === test.name);
-            if (existingTestIndex >= 0) {
-              const updated = [...prevVariables];
-              updated[existingTestIndex] = { ...updated[existingTestIndex], bearerToken };
-              return updated;
-            }
-            return [...prevVariables, { testName: test.name, variables: [], bearerToken }];
-          });
-
-          // Save Bearer token to localStorage
-          const savedTokens = localStorage.getItem('test_bearer_tokens');
-          const tokens = savedTokens ? JSON.parse(savedTokens) : {};
-          tokens[test.name] = bearerToken;
-          localStorage.setItem('test_bearer_tokens', JSON.stringify(tokens));
-
-          // Notify about new Bearer token
-          window.dispatchEvent(new CustomEvent('bearer_token_updated', { 
-            detail: { testName: test.name, bearerToken } 
-          }));
         }
 
       } catch (error) {
