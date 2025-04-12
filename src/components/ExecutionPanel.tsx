@@ -126,6 +126,12 @@ interface TestVariable {
   }>;
 }
 
+interface Environment {
+  name: string;
+  baseUrl: string;
+  parameters: Record<string, string>;
+}
+
 const STORAGE_KEYS = {
   TEST_VARIABLES: 'test_automation_variables',
   TEST_STATUS: 'test_automation_status',
@@ -133,7 +139,8 @@ const STORAGE_KEYS = {
   SELECTED_SUITE: 'test_automation_selected_suite',
   API_REQUESTS: 'test_automation_api_requests',
   TEST_LOGS: 'test_automation_logs',
-  CONFIG: 'test_automation_config'
+  CONFIG: 'test_automation_config',
+  ENVIRONMENTS: 'test_automation_environments'
 };
 
 const ajv = new Ajv();
@@ -153,6 +160,27 @@ function ExecutionPanel() {
   const [authType, setAuthType] = useState<'mfa' | 'bearer'>('mfa');
   const [mfaSecret, setMfaSecret] = useState('');
   const [bearerToken, setBearerToken] = useState('');
+  const [environments, setEnvironments] = useState<Environment[]>([]);
+  const [selectedEnvironment, setSelectedEnvironment] = useState<string>('');
+
+  useEffect(() => {
+    const loadSavedData = () => {
+      try {
+        const savedEnvironments = localStorage.getItem(STORAGE_KEYS.ENVIRONMENTS);
+        if (savedEnvironments) {
+          const parsedEnvironments = JSON.parse(savedEnvironments);
+          setEnvironments(parsedEnvironments);
+          if (parsedEnvironments.length > 0) {
+            setSelectedEnvironment(parsedEnvironments[0].name);
+          }
+        }
+      } catch (error) {
+        enqueueSnackbar('Error loading environments', { variant: 'error' });
+      }
+    };
+
+    loadSavedData();
+  }, [enqueueSnackbar]);
 
   // Load saved variables on mount and when storage changes
   useEffect(() => {
@@ -595,20 +623,77 @@ function ExecutionPanel() {
 
         const startTime = Date.now();
         
+        // Get the environment for this test
+        const savedRequests = localStorage.getItem(STORAGE_KEYS.API_REQUESTS);
+        if (!savedRequests) {
+          throw new Error('No API requests found');
+        }
+
+        const requests: ApiRequest[] = JSON.parse(savedRequests);
+        const request = requests.find(r => r.name === test.name);
+        if (!request) {
+          throw new Error(`Request not found: ${test.name}`);
+        }
+
+        const environment = environments.find(env => env.name === request.environment);
+        if (!environment) {
+          throw new Error(`Environment not found: ${request.environment}`);
+        }
+
+        // Construct the full URL using the environment's base URL
+        const baseUrl = environment.baseUrl.endsWith('/') ? environment.baseUrl.slice(0, -1) : environment.baseUrl;
+        const endpoint = request.endpoint.startsWith('/') ? request.endpoint : `/${request.endpoint}`;
+        const fullUrl = `${baseUrl}${endpoint}`;
+
+        // Replace environment parameters in the URL
+        let finalUrl = fullUrl;
+        Object.entries(environment.parameters).forEach(([key, value]) => {
+          finalUrl = finalUrl.replace(`{${key}}`, value);
+        });
+
         // Parse headers and ensure Content-Type is set for requests with body
-        const headers = JSON.parse(test.headers || '{}');
-        if (test.method !== 'GET' && test.body) {
+        let headers = {};
+        try {
+          headers = JSON.parse(request.headers || '{}');
+        } catch (error) {
+          console.error('Error parsing headers:', error);
+          headers = {};
+        }
+
+        if (request.method !== 'GET' && request.body) {
           headers['Content-Type'] = headers['Content-Type'] || 'application/json';
         }
 
-        const response = await fetch(test.endpoint, {
-          method: test.method,
+        // Replace environment parameters in headers and body
+        let body = {};
+        try {
+          body = JSON.parse(request.body || '{}');
+        } catch (error) {
+          console.error('Error parsing body:', error);
+          body = {};
+        }
+
+        Object.entries(environment.parameters).forEach(([key, value]) => {
+          const headersStr = JSON.stringify(headers);
+          const bodyStr = JSON.stringify(body);
+          
+          try {
+            headers = JSON.parse(headersStr.replace(`{${key}}`, value));
+          } catch (error) {
+            console.error('Error replacing parameters in headers:', error);
+          }
+          try {
+            body = JSON.parse(bodyStr.replace(`{${key}}`, value));
+          } catch (error) {
+            console.error('Error replacing parameters in body:', error);
+          }
+        });
+
+        console.log('Making request to:', finalUrl); // Debug log
+        const response = await fetch(finalUrl, {
+          method: request.method,
           headers: headers,
-          body: test.method !== 'GET' && test.body ? 
-            (headers['Content-Type']?.includes('application/json') ? 
-              JSON.stringify(JSON.parse(test.body)) : 
-              test.body) : 
-            undefined,
+          body: request.method !== 'GET' ? JSON.stringify(body) : undefined,
         });
 
         let responseData = {};
@@ -618,7 +703,7 @@ function ExecutionPanel() {
             responseData = await response.json();
           } catch (error) {
             // If JSON parsing fails, use empty object for DELETE requests
-            if (test.method !== 'DELETE') {
+            if (request.method !== 'DELETE') {
               throw error;
             }
           }
@@ -655,28 +740,17 @@ function ExecutionPanel() {
           `Status: ${testStatus.toUpperCase()}`,
           `Duration: ${duration}ms`,
           `Request Details:`,
-          `  Method: ${test.method}`,
-          `  Endpoint: ${test.endpoint}`,
-          `  Headers: ${JSON.stringify(JSON.parse(test.headers || '{}'), null, 2)}`,
-          `  Body: ${test.body || 'None'}`,
+          `  Method: ${request.method}`,
+          `  Base URL: ${baseUrl}`,
+          `  Endpoint: ${endpoint}`,
+          `  Full URL: ${finalUrl}`,
+          `  Headers: ${JSON.stringify(headers, null, 2)}`,
+          `  Body: ${request.body || 'None'}`,
           `Response Details:`,
           `  Status: ${response.status}`,
           `  Expected Status: ${test.expectedStatus}`,
           `  Body: ${JSON.stringify(responseData, null, 2)}`,
         ];
-
-        if (assertionResults) {
-          formattedLogs.push('Assertion Results:');
-          assertionResults.forEach(result => {
-            formattedLogs.push(
-              `Assertion: ${result.field}`,
-              `  Expected: ${result.expected}`,
-              `  Actual: ${result.actual}`,
-              `  Status: ${result.passed ? 'PASSED' : 'FAILED'}`,
-              `  Message: ${result.message}`
-            );
-          });
-        }
 
         // Update test status and logs
         setTests(prevTests =>
@@ -983,420 +1057,528 @@ function ExecutionPanel() {
     test => selectedSuite === 'all' || test.suite === selectedSuite
   );
 
-  return (
-    <Box sx={{ p: 3 }}>
-      <Typography variant="h5" gutterBottom sx={{ color: 'primary.main', fontWeight: 'bold' }}>
-        Test Execution
-      </Typography>
+  const executeTest = async (test: TestStatus) => {
+    try {
+      const savedRequests = localStorage.getItem(STORAGE_KEYS.API_REQUESTS);
+      if (!savedRequests) {
+        throw new Error('No API requests found');
+      }
 
-      <Grid container spacing={3}>
-        {/* Variables Section */}
-        <Grid item xs={12} md={4}>
-          <Card sx={{ height: '100%' }}>
-            <CardContent>
-              <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
-                <Typography variant="h6" sx={{ color: 'primary.main' }}>
-                  Variables
-                </Typography>
-                <Button
-                  variant="outlined"
-                  color="secondary"
-                  size="small"
-                  startIcon={<DeleteIcon />}
-                  onClick={clearVariables}
-                  disabled={testVariables.length === 0}
-                  sx={{
-                    borderRadius: 1,
-                    px: 1.5,
-                    py: 0.5,
-                    minWidth: 'auto',
-                    '&:hover': {
-                      transform: 'translateY(-1px)',
-                      boxShadow: 1,
-                    },
-                    transition: 'all 0.2s ease-in-out',
-                  }}
-                >
-                  Clear All
-                </Button>
-              </Box>
-              <Box sx={{ maxHeight: 'calc(100vh - 300px)', overflow: 'auto' }}>
-                {testVariables.length === 0 ? (
-                  <Box sx={{ textAlign: 'center', py: 3 }}>
-                    <Typography variant="body2" color="text.secondary">
-                      No variables available. Run tests to see variables.
-                    </Typography>
-                  </Box>
-                ) : (
-                  testVariables.map((testVar) => (
-                    <Accordion key={testVar.testName} defaultExpanded>
-                      <AccordionSummary expandIcon={<ExpandMoreIcon />}>
-                        <Box sx={{ display: 'flex', alignItems: 'center', width: '100%' }}>
-                          <Typography variant="subtitle1" sx={{ flexGrow: 1 }}>
-                            {testVar.testName}
-                          </Typography>
-                          <Chip
-                            label={`${testVar.variables.length} variables`}
-                            size="small"
-                            color="primary"
-                            variant="outlined"
-                          />
-                        </Box>
-                      </AccordionSummary>
-                      <AccordionDetails>
-                        <TableContainer component={Paper} variant="outlined">
-                          <Table size="small">
-                            <TableHead>
-                              <TableRow>
-                                <TableCell width="40%">Name</TableCell>
-                                <TableCell width="60%">Value</TableCell>
-                              </TableRow>
-                            </TableHead>
-                            <TableBody>
-                              {testVar.variables.map((variable, index) => (
-                                <TableRow key={index} hover>
-                                  <TableCell>
-                                    <Typography 
-                                      variant="body2" 
-                                      sx={{ 
-                                        fontFamily: 'monospace',
-                                        wordBreak: 'break-all'
-                                      }}
-                                    >
-                                      {variable.name}
-                                    </Typography>
-                                  </TableCell>
-                                  <TableCell>
-                                    <Box sx={{ 
-                                      maxHeight: '200px', 
-                                      overflow: 'auto',
-                                      bgcolor: 'grey.50',
-                                      p: 1,
-                                      borderRadius: 1
-                                    }}>
+      const requests: ApiRequest[] = JSON.parse(savedRequests);
+      const request = requests.find(r => r.name === test.name);
+      if (!request) {
+        throw new Error(`Request not found: ${test.name}`);
+      }
+
+      // Get the environment for this request
+      const environment = environments.find(env => env.name === request.environment);
+      if (!environment) {
+        throw new Error(`Environment not found: ${request.environment}`);
+      }
+
+      // Construct the full URL using the environment's base URL
+      const baseUrl = environment.baseUrl.endsWith('/') ? environment.baseUrl.slice(0, -1) : environment.baseUrl;
+      const endpoint = request.endpoint.startsWith('/') ? request.endpoint : `/${request.endpoint}`;
+      const fullUrl = `${baseUrl}${endpoint}`;
+
+      // Replace environment parameters in the URL
+      let finalUrl = fullUrl;
+      Object.entries(environment.parameters).forEach(([key, value]) => {
+        finalUrl = finalUrl.replace(`{${key}}`, value);
+      });
+
+      // Replace environment parameters in headers and body
+      let headers = JSON.parse(request.headers || '{}');
+      let body = JSON.parse(request.body || '{}');
+
+      Object.entries(environment.parameters).forEach(([key, value]) => {
+        const headersStr = JSON.stringify(headers);
+        const bodyStr = JSON.stringify(body);
+        
+        headers = JSON.parse(headersStr.replace(`{${key}}`, value));
+        body = JSON.parse(bodyStr.replace(`{${key}}`, value));
+      });
+
+      // Make the API request
+      const startTime = Date.now();
+      console.log('Making request to:', finalUrl); // Debug log
+      const response = await fetch(finalUrl, {
+        method: request.method,
+        headers: headers,
+        body: request.method !== 'GET' ? JSON.stringify(body) : undefined,
+      });
+
+      const responseData = await response.json();
+      const duration = Date.now() - startTime;
+
+      // Extract and store variables from response
+      const newVariables = extractVariablesFromResponse(test.name, responseData);
+      
+      // Update test variables
+      setTestVariables(prev => {
+        const existingTestIndex = prev.findIndex(tv => tv.testName === test.name);
+        if (existingTestIndex >= 0) {
+          const updated = [...prev];
+          updated[existingTestIndex] = {
+            testName: test.name,
+            variables: newVariables
+          };
+          return updated;
+        }
+        return [...prev, { testName: test.name, variables: newVariables }];
+      });
+
+      // Validate assertions if they exist
+      const assertionResults = test.assertions ? await validateAssertions(responseData, test.assertions) : undefined;
+      const allAssertionsPassed = assertionResults ? assertionResults.every(a => a.passed) : true;
+
+      const testStatus = response.status === test.expectedStatus && allAssertionsPassed ? 'passed' : 'failed';
+      
+      // Create formatted logs
+      const formattedLogs = [
+        `Test: ${test.name}`,
+        `Status: ${testStatus.toUpperCase()}`,
+        `Duration: ${duration}ms`,
+        `Request Details:`,
+        `  Method: ${request.method}`,
+        `  Base URL: ${baseUrl}`,
+        `  Endpoint: ${endpoint}`,
+        `  Full URL: ${finalUrl}`,
+        `  Headers: ${JSON.stringify(headers, null, 2)}`,
+        `  Body: ${request.body || 'None'}`,
+        `Response Details:`,
+        `  Status: ${response.status}`,
+        `  Expected Status: ${test.expectedStatus}`,
+        `  Body: ${JSON.stringify(responseData, null, 2)}`,
+      ];
+
+      // ... rest of the existing executeTest code ...
+    } catch (error) {
+      console.error('Error executing test:', error);
+      enqueueSnackbar(error instanceof Error ? error.message : 'Error executing test', { variant: 'error' });
+    }
+  };
+
+  return (
+    <motion.div
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      transition={{ duration: 0.5 }}
+    >
+      <Box sx={{ p: 3 }}>
+        <Typography variant="h5" gutterBottom sx={{ color: 'primary.main', fontWeight: 'bold' }}>
+          Test Execution
+        </Typography>
+
+        <Grid container spacing={3}>
+          {/* Variables Section */}
+          <Grid item xs={12} md={4}>
+            <Card sx={{ height: '100%' }}>
+              <CardContent>
+                <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
+                  <Typography variant="h6" sx={{ color: 'primary.main' }}>
+                    Variables
+                  </Typography>
+                  <Button
+                    variant="outlined"
+                    color="secondary"
+                    size="small"
+                    startIcon={<DeleteIcon />}
+                    onClick={clearVariables}
+                    disabled={testVariables.length === 0}
+                    sx={{
+                      borderRadius: 1,
+                      px: 1.5,
+                      py: 0.5,
+                      minWidth: 'auto',
+                      '&:hover': {
+                        transform: 'translateY(-1px)',
+                        boxShadow: 1,
+                      },
+                      transition: 'all 0.2s ease-in-out',
+                    }}
+                  >
+                    Clear All
+                  </Button>
+                </Box>
+                <Box sx={{ maxHeight: 'calc(100vh - 300px)', overflow: 'auto' }}>
+                  {testVariables.length === 0 ? (
+                    <Box sx={{ textAlign: 'center', py: 3 }}>
+                      <Typography variant="body2" color="text.secondary">
+                        No variables available. Run tests to see variables.
+                      </Typography>
+                    </Box>
+                  ) : (
+                    testVariables.map((testVar) => (
+                      <Accordion key={testVar.testName} defaultExpanded>
+                        <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+                          <Box sx={{ display: 'flex', alignItems: 'center', width: '100%' }}>
+                            <Typography variant="subtitle1" sx={{ flexGrow: 1 }}>
+                              {testVar.testName}
+                            </Typography>
+                            <Chip
+                              label={`${testVar.variables.length} variables`}
+                              size="small"
+                              color="primary"
+                              variant="outlined"
+                            />
+                          </Box>
+                        </AccordionSummary>
+                        <AccordionDetails>
+                          <TableContainer component={Paper} variant="outlined">
+                            <Table size="small">
+                              <TableHead>
+                                <TableRow>
+                                  <TableCell width="40%">Name</TableCell>
+                                  <TableCell width="60%">Value</TableCell>
+                                </TableRow>
+                              </TableHead>
+                              <TableBody>
+                                {testVar.variables.map((variable, index) => (
+                                  <TableRow key={index} hover>
+                                    <TableCell>
                                       <Typography 
                                         variant="body2" 
                                         sx={{ 
                                           fontFamily: 'monospace',
-                                          whiteSpace: 'pre-wrap',
                                           wordBreak: 'break-all'
                                         }}
                                       >
-                                        {typeof variable.value === 'object' 
-                                          ? JSON.stringify(variable.value, null, 2)
-                                          : String(variable.value)}
+                                        {variable.name}
                                       </Typography>
-                                    </Box>
-                                  </TableCell>
-                                </TableRow>
-                              ))}
-                            </TableBody>
-                          </Table>
-                        </TableContainer>
-                      </AccordionDetails>
-                    </Accordion>
-                  ))
-                )}
-              </Box>
-            </CardContent>
-          </Card>
-        </Grid>
+                                    </TableCell>
+                                    <TableCell>
+                                      <Box sx={{ 
+                                        maxHeight: '200px', 
+                                        overflow: 'auto',
+                                        bgcolor: 'grey.50',
+                                        p: 1,
+                                        borderRadius: 1
+                                      }}>
+                                        <Typography 
+                                          variant="body2" 
+                                          sx={{ 
+                                            fontFamily: 'monospace',
+                                            whiteSpace: 'pre-wrap',
+                                            wordBreak: 'break-all'
+                                          }}
+                                        >
+                                          {typeof variable.value === 'object' 
+                                            ? JSON.stringify(variable.value, null, 2)
+                                            : String(variable.value)}
+                                        </Typography>
+                                      </Box>
+                                    </TableCell>
+                                  </TableRow>
+                                ))}
+                              </TableBody>
+                            </Table>
+                          </TableContainer>
+                        </AccordionDetails>
+                      </Accordion>
+                    ))
+                  )}
+                </Box>
+              </CardContent>
+            </Card>
+          </Grid>
 
-        {/* Test Execution Section */}
-        <Grid item xs={12} md={8}>
-          <Card>
-            <CardContent>
-              <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
-                <Typography variant="h6" sx={{ color: 'primary.main' }}>
-                  Test Execution
-                </Typography>
-                <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
-                  <FormControl size="small" sx={{ minWidth: 120 }}>
-                    <InputLabel>Test Suite</InputLabel>
-                    <Select
-                      value={selectedSuite}
-                      label="Test Suite"
-                      onChange={handleSuiteChange}
+          {/* Test Execution Section */}
+          <Grid item xs={12} md={8}>
+            <Card>
+              <CardContent>
+                <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
+                  <Typography variant="h6" sx={{ color: 'primary.main' }}>
+                    Test Execution
+                  </Typography>
+                  <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+                    <FormControl size="small" sx={{ minWidth: 120 }}>
+                      <InputLabel>Test Suite</InputLabel>
+                      <Select
+                        value={selectedSuite}
+                        label="Test Suite"
+                        onChange={handleSuiteChange}
+                      >
+                        <MenuItem value="all">All Suites</MenuItem>
+                        {Object.values(TEST_SUITES).map((suite) => (
+                          <MenuItem key={suite} value={suite}>
+                            {suite.charAt(0).toUpperCase() + suite.slice(1)} Tests
+                          </MenuItem>
+                        ))}
+                      </Select>
+                    </FormControl>
+                    <Button
+                      variant="outlined"
+                      size="small"
+                      startIcon={<RefreshIcon />}
+                      onClick={loadTests}
+                      sx={{
+                        borderRadius: 1,
+                        px: 1.5,
+                        py: 0.5,
+                        minWidth: 'auto',
+                        '&:hover': {
+                          transform: 'translateY(-1px)',
+                          boxShadow: 1,
+                        },
+                        transition: 'all 0.2s ease-in-out',
+                      }}
                     >
-                      <MenuItem value="all">All Suites</MenuItem>
-                      {Object.values(TEST_SUITES).map((suite) => (
-                        <MenuItem key={suite} value={suite}>
-                          {suite.charAt(0).toUpperCase() + suite.slice(1)} Tests
-                        </MenuItem>
-                      ))}
-                    </Select>
-                  </FormControl>
-                  <Button
-                    variant="outlined"
-                    size="small"
-                    startIcon={<RefreshIcon />}
-                    onClick={loadTests}
-                    sx={{
-                      borderRadius: 1,
-                      px: 1.5,
-                      py: 0.5,
-                      minWidth: 'auto',
-                      '&:hover': {
-                        transform: 'translateY(-1px)',
-                        boxShadow: 1,
-                      },
-                      transition: 'all 0.2s ease-in-out',
-                    }}
-                  >
-                    Refresh
-                  </Button>
-                  <LoadingButton
-                    variant="contained"
-                    color="primary"
-                    size="small"
-                    onClick={startTests}
-                    loading={isRunning}
-                    disabled={isRunning || selectedTests.length === 0}
-                    startIcon={<PlayArrowIcon />}
-                    sx={{
-                      borderRadius: 1,
-                      px: 2,
-                      py: 0.5,
-                      minWidth: 'auto',
-                      '&:hover': {
-                        transform: 'translateY(-1px)',
-                        boxShadow: 2,
-                      },
-                      transition: 'all 0.2s ease-in-out',
-                    }}
-                  >
-                    Run
-                  </LoadingButton>
-                  <Button
-                    variant="contained"
-                    color="secondary"
-                    size="small"
-                    startIcon={<StopIcon />}
-                    onClick={stopTests}
-                    disabled={!isRunning}
-                    sx={{
-                      borderRadius: 1,
-                      px: 2,
-                      py: 0.5,
-                      minWidth: 'auto',
-                      '&:hover': {
-                        transform: 'translateY(-1px)',
-                        boxShadow: 2,
-                      },
-                      transition: 'all 0.2s ease-in-out',
-                    }}
-                  >
-                    Stop
-                  </Button>
-                  <Button
-                    variant="outlined"
-                    color="error"
-                    size="small"
-                    startIcon={<DeleteIcon />}
-                    onClick={clearAllLogs}
-                    sx={{
-                      borderRadius: 1,
-                      px: 1.5,
-                      py: 0.5,
-                      minWidth: 'auto',
-                      '&:hover': {
-                        transform: 'translateY(-1px)',
-                        boxShadow: 1,
-                      },
-                      transition: 'all 0.2s ease-in-out',
-                    }}
-                  >
-                    Clear Logs
-                  </Button>
+                      Refresh
+                    </Button>
+                    <LoadingButton
+                      variant="contained"
+                      color="primary"
+                      size="small"
+                      onClick={startTests}
+                      loading={isRunning}
+                      disabled={isRunning || selectedTests.length === 0}
+                      startIcon={<PlayArrowIcon />}
+                      sx={{
+                        borderRadius: 1,
+                        px: 2,
+                        py: 0.5,
+                        minWidth: 'auto',
+                        '&:hover': {
+                          transform: 'translateY(-1px)',
+                          boxShadow: 2,
+                        },
+                        transition: 'all 0.2s ease-in-out',
+                      }}
+                    >
+                      Run
+                    </LoadingButton>
+                    <Button
+                      variant="contained"
+                      color="secondary"
+                      size="small"
+                      startIcon={<StopIcon />}
+                      onClick={stopTests}
+                      disabled={!isRunning}
+                      sx={{
+                        borderRadius: 1,
+                        px: 2,
+                        py: 0.5,
+                        minWidth: 'auto',
+                        '&:hover': {
+                          transform: 'translateY(-1px)',
+                          boxShadow: 2,
+                        },
+                        transition: 'all 0.2s ease-in-out',
+                      }}
+                    >
+                      Stop
+                    </Button>
+                    <Button
+                      variant="outlined"
+                      color="error"
+                      size="small"
+                      startIcon={<DeleteIcon />}
+                      onClick={clearAllLogs}
+                      sx={{
+                        borderRadius: 1,
+                        px: 1.5,
+                        py: 0.5,
+                        minWidth: 'auto',
+                        '&:hover': {
+                          transform: 'translateY(-1px)',
+                          boxShadow: 1,
+                        },
+                        transition: 'all 0.2s ease-in-out',
+                      }}
+                    >
+                      Clear Logs
+                    </Button>
+                  </Box>
                 </Box>
-              </Box>
 
-              {isRunning && (
-                <Box sx={{ mb: 3 }}>
-                  <Typography variant="body2" color="text.secondary" gutterBottom>
-                    Overall Progress
-                  </Typography>
-                  <LinearProgress 
-                    variant="determinate" 
-                    value={progress} 
-                    sx={{ 
-                      height: 10, 
-                      borderRadius: 5,
-                      bgcolor: 'grey.200',
-                    }} 
-                  />
-                  <Typography variant="body2" color="text.secondary" align="right" sx={{ mt: 1 }}>
-                    {progress}%
-                  </Typography>
-                </Box>
-              )}
-
-              <List>
-                <ListItem>
-                  <ListItemIcon>
-                    <Checkbox
-                      checked={
-                        filteredTests.length > 0 &&
-                        filteredTests.every(test => selectedTests.includes(test.name))
-                      }
-                      indeterminate={
-                        selectedTests.length > 0 &&
-                        selectedTests.length < filteredTests.length
-                      }
-                      onChange={handleSelectAllTests}
+                {isRunning && (
+                  <Box sx={{ mb: 3 }}>
+                    <Typography variant="body2" color="text.secondary" gutterBottom>
+                      Overall Progress
+                    </Typography>
+                    <LinearProgress 
+                      variant="determinate" 
+                      value={progress} 
+                      sx={{ 
+                        height: 10, 
+                        borderRadius: 5,
+                        bgcolor: 'grey.200',
+                      }} 
                     />
-                  </ListItemIcon>
-                  <ListItemText primary="Select All" />
-                </ListItem>
-                {filteredTests.length === 0 ? (
-                  <Box sx={{ textAlign: 'center', py: 3 }}>
-                    <Typography variant="body2" color="text.secondary">
-                      No tests available. Add tests in the Configuration tab.
+                    <Typography variant="body2" color="text.secondary" align="right" sx={{ mt: 1 }}>
+                      {progress}%
                     </Typography>
                   </Box>
-                ) : (
-                  filteredTests.map((test, index) => (
-                    <motion.div
-                      key={index}
-                      initial={{ x: -20, opacity: 0 }}
-                      animate={{ x: 0, opacity: 1 }}
-                      transition={{ delay: index * 0.1 }}
-                    >
-                      <ListItem 
-                        sx={{ 
-                          borderRadius: 2,
-                          mb: 1,
-                          bgcolor: 'background.paper',
-                          boxShadow: 1,
-                        }}
-                      >
-                        <ListItemIcon>
-                          <Checkbox
-                            checked={selectedTests.includes(test.name)}
-                            onChange={() => handleTestSelection(test.name)}
-                            disabled={isRunning}
-                          />
-                        </ListItemIcon>
-                        <Box sx={{ mr: 2 }}>
-                          {getStatusIcon(test.status)}
-                        </Box>
-                        <ListItemText 
-                          primary={test.name}
-                          secondary={
-                            <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
-                              <Chip 
-                                label={test.suite} 
-                                size="small" 
-                                color={test.suite === TEST_SUITES.SMOKE ? 'success' : 
-                                       test.suite === TEST_SUITES.REGRESSION ? 'primary' :
-                                       test.suite === TEST_SUITES.SANITY ? 'warning' : 'secondary'}
-                              />
-                              {test.duration > 0 && `Duration: ${test.duration}ms`}
-                            </Box>
-                          }
-                        />
-                        <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
-                          <Tooltip title="Download Logs">
-                            <IconButton
-                              size="small"
-                              onClick={() => downloadLogs(test.name)}
-                              disabled={!test.logs}
-                            >
-                              <DownloadIcon />
-                            </IconButton>
-                          </Tooltip>
-                          <Tooltip title={test.isExpanded ? "Collapse" : "Expand"}>
-                            <IconButton
-                              size="small"
-                              onClick={() => toggleExpand(test.name)}
-                            >
-                              {test.isExpanded ? <ExpandLessIcon /> : <ExpandMoreIcon />}
-                            </IconButton>
-                          </Tooltip>
-                          {getStatusChip(test.status)}
-                        </Box>
-                      </ListItem>
-                      {test.isExpanded && test.logs && (
-                        <Box sx={{ pl: 4, mb: 2 }}>
-                          <Paper sx={{ p: 2, bgcolor: 'grey.50' }}>
-                            <Typography variant="subtitle2" gutterBottom>
-                              Test Logs:
-                            </Typography>
-                            <Box sx={{ maxHeight: 400, overflow: 'auto' }}>
-                              {test.logs.split('\n').map((log, logIndex) => {
-                                // Style different parts of the log
-                                if (log.startsWith('Test:')) {
-                                  return (
-                                    <Typography key={logIndex} variant="subtitle2" sx={{ fontWeight: 'bold', mt: 1 }}>
-                                      {log}
-                                    </Typography>
-                                  );
-                                } else if (log.startsWith('Status:')) {
-                                  const isPassed = log.includes('PASSED');
-                                  return (
-                                    <Typography key={logIndex} variant="body2" color={isPassed ? 'success.main' : 'error.main'}>
-                                      {log}
-                                    </Typography>
-                                  );
-                                } else if (log.startsWith('Duration:')) {
-                                  return (
-                                    <Typography key={logIndex} variant="body2" color="text.secondary">
-                                      {log}
-                                    </Typography>
-                                  );
-                                } else if (log.startsWith('Request Details:') || log.startsWith('Response Details:') || log.startsWith('Assertion Results:')) {
-                                  return (
-                                    <Typography key={logIndex} variant="subtitle2" sx={{ fontWeight: 'bold', mt: 2 }}>
-                                      {log}
-                                    </Typography>
-                                  );
-                                } else if (log.startsWith('Assertion')) {
-                                  return (
-                                    <Typography key={logIndex} variant="subtitle2" sx={{ fontWeight: 'bold', mt: 1 }}>
-                                      {log}
-                                    </Typography>
-                                  );
-                                } else if (log.startsWith('Field:') || log.startsWith('Expected:') || log.startsWith('Actual:')) {
-                                  return (
-                                    <Typography key={logIndex} variant="body2" sx={{ pl: 2 }}>
-                                      {log}
-                                    </Typography>
-                                  );
-                                } else if (log.startsWith('Status:')) {
-                                  const isPassed = log.includes('PASSED');
-                                  return (
-                                    <Typography key={logIndex} variant="body2" color={isPassed ? 'success.main' : 'error.main'} sx={{ pl: 2 }}>
-                                      {log}
-                                    </Typography>
-                                  );
-                                } else if (log.startsWith('Message:')) {
-                                  const isPassed = log.includes('PASSED');
-                                  return (
-                                    <Typography key={logIndex} variant="body2" color={isPassed ? 'success.main' : 'error.main'} sx={{ pl: 2, mb: 1 }}>
-                                      {log}
-                                    </Typography>
-                                  );
-                                } else {
-                                  return (
-                                    <Typography key={logIndex} variant="body2" sx={{ fontFamily: 'monospace' }}>
-                                      {log}
-                                    </Typography>
-                                  );
-                                }
-                              })}
-                            </Box>
-                          </Paper>
-                        </Box>
-                      )}
-                    </motion.div>
-                  ))
                 )}
-              </List>
-            </CardContent>
-          </Card>
+
+                <List>
+                  <ListItem>
+                    <ListItemIcon>
+                      <Checkbox
+                        checked={
+                          filteredTests.length > 0 &&
+                          filteredTests.every(test => selectedTests.includes(test.name))
+                        }
+                        indeterminate={
+                          selectedTests.length > 0 &&
+                          selectedTests.length < filteredTests.length
+                        }
+                        onChange={handleSelectAllTests}
+                      />
+                    </ListItemIcon>
+                    <ListItemText primary="Select All" />
+                  </ListItem>
+                  {filteredTests.length === 0 ? (
+                    <Box sx={{ textAlign: 'center', py: 3 }}>
+                      <Typography variant="body2" color="text.secondary">
+                        No tests available. Add tests in the Configuration tab.
+                      </Typography>
+                    </Box>
+                  ) : (
+                    filteredTests.map((test, index) => (
+                      <motion.div
+                        key={index}
+                        initial={{ x: -20, opacity: 0 }}
+                        animate={{ x: 0, opacity: 1 }}
+                        transition={{ delay: index * 0.1 }}
+                      >
+                        <ListItem 
+                          sx={{ 
+                            borderRadius: 2,
+                            mb: 1,
+                            bgcolor: 'background.paper',
+                            boxShadow: 1,
+                          }}
+                        >
+                          <ListItemIcon>
+                            <Checkbox
+                              checked={selectedTests.includes(test.name)}
+                              onChange={() => handleTestSelection(test.name)}
+                              disabled={isRunning}
+                            />
+                          </ListItemIcon>
+                          <Box sx={{ mr: 2 }}>
+                            {getStatusIcon(test.status)}
+                          </Box>
+                          <ListItemText 
+                            primary={test.name}
+                            secondary={
+                              <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+                                <Chip 
+                                  label={test.suite} 
+                                  size="small" 
+                                  color={test.suite === TEST_SUITES.SMOKE ? 'success' : 
+                                         test.suite === TEST_SUITES.REGRESSION ? 'primary' :
+                                         test.suite === TEST_SUITES.SANITY ? 'warning' : 'secondary'}
+                                />
+                                {test.duration > 0 && `Duration: ${test.duration}ms`}
+                              </Box>
+                            }
+                          />
+                          <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+                            <Tooltip title="Download Logs">
+                              <IconButton
+                                size="small"
+                                onClick={() => downloadLogs(test.name)}
+                                disabled={!test.logs}
+                              >
+                                <DownloadIcon />
+                              </IconButton>
+                            </Tooltip>
+                            <Tooltip title={test.isExpanded ? "Collapse" : "Expand"}>
+                              <IconButton
+                                size="small"
+                                onClick={() => toggleExpand(test.name)}
+                              >
+                                {test.isExpanded ? <ExpandLessIcon /> : <ExpandMoreIcon />}
+                              </IconButton>
+                            </Tooltip>
+                            {getStatusChip(test.status)}
+                          </Box>
+                        </ListItem>
+                        {test.isExpanded && test.logs && (
+                          <Box sx={{ pl: 4, mb: 2 }}>
+                            <Paper sx={{ p: 2, bgcolor: 'grey.50' }}>
+                              <Typography variant="subtitle2" gutterBottom>
+                                Test Logs:
+                              </Typography>
+                              <Box sx={{ maxHeight: 400, overflow: 'auto' }}>
+                                {test.logs.split('\n').map((log, logIndex) => {
+                                  // Style different parts of the log
+                                  if (log.startsWith('Test:')) {
+                                    return (
+                                      <Typography key={logIndex} variant="subtitle2" sx={{ fontWeight: 'bold', mt: 1 }}>
+                                        {log}
+                                      </Typography>
+                                    );
+                                  } else if (log.startsWith('Status:')) {
+                                    const isPassed = log.includes('PASSED');
+                                    return (
+                                      <Typography key={logIndex} variant="body2" color={isPassed ? 'success.main' : 'error.main'}>
+                                        {log}
+                                      </Typography>
+                                    );
+                                  } else if (log.startsWith('Duration:')) {
+                                    return (
+                                      <Typography key={logIndex} variant="body2" color="text.secondary">
+                                        {log}
+                                      </Typography>
+                                    );
+                                  } else if (log.startsWith('Request Details:') || log.startsWith('Response Details:') || log.startsWith('Assertion Results:')) {
+                                    return (
+                                      <Typography key={logIndex} variant="subtitle2" sx={{ fontWeight: 'bold', mt: 2 }}>
+                                        {log}
+                                      </Typography>
+                                    );
+                                  } else if (log.startsWith('Assertion')) {
+                                    return (
+                                      <Typography key={logIndex} variant="subtitle2" sx={{ fontWeight: 'bold', mt: 1 }}>
+                                        {log}
+                                      </Typography>
+                                    );
+                                  } else if (log.startsWith('Field:') || log.startsWith('Expected:') || log.startsWith('Actual:')) {
+                                    return (
+                                      <Typography key={logIndex} variant="body2" sx={{ pl: 2 }}>
+                                        {log}
+                                      </Typography>
+                                    );
+                                  } else if (log.startsWith('Status:')) {
+                                    const isPassed = log.includes('PASSED');
+                                    return (
+                                      <Typography key={logIndex} variant="body2" color={isPassed ? 'success.main' : 'error.main'} sx={{ pl: 2 }}>
+                                        {log}
+                                      </Typography>
+                                    );
+                                  } else if (log.startsWith('Message:')) {
+                                    const isPassed = log.includes('PASSED');
+                                    return (
+                                      <Typography key={logIndex} variant="body2" color={isPassed ? 'success.main' : 'error.main'} sx={{ pl: 2, mb: 1 }}>
+                                        {log}
+                                      </Typography>
+                                    );
+                                  } else {
+                                    return (
+                                      <Typography key={logIndex} variant="body2" sx={{ fontFamily: 'monospace' }}>
+                                        {log}
+                                      </Typography>
+                                    );
+                                  }
+                                })}
+                              </Box>
+                            </Paper>
+                          </Box>
+                        )}
+                      </motion.div>
+                    ))
+                  )}
+                </List>
+              </CardContent>
+            </Card>
+          </Grid>
         </Grid>
-      </Grid>
-    </Box>
+      </Box>
+    </motion.div>
   );
 }
 

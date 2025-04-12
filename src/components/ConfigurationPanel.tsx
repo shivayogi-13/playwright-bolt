@@ -34,34 +34,36 @@ import {
   AccordionSummary,
   AccordionDetails,
   CircularProgress,
+  SelectChangeEvent,
+  Checkbox,
+  TableSortLabel,
+  useTheme,
+  useMediaQuery,
+  Divider,
 } from '@mui/material';
 import { LoadingButton } from '@mui/lab';
 import { useForm, Controller } from 'react-hook-form';
 import { motion } from 'framer-motion';
 import { useSnackbar } from 'notistack';
-import HelpOutlineIcon from '@mui/icons-material/HelpOutline';
-import SaveIcon from '@mui/icons-material/Save';
-import UploadFileIcon from '@mui/icons-material/UploadFile';
-import DownloadIcon from '@mui/icons-material/Download';
-import AddIcon from '@mui/icons-material/Add';
-import DeleteIcon from '@mui/icons-material/Delete';
-import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
-import ExpandLessIcon from '@mui/icons-material/ExpandLess';
-import EditIcon from '@mui/icons-material/Edit';
-import AddCircleOutlineIcon from '@mui/icons-material/AddCircleOutline';
+import {
+  Add as AddIcon,
+  Edit as EditIcon,
+  Delete as DeleteIcon,
+  ExpandMore as ExpandMoreIcon,
+  DragIndicator as DragIndicatorIcon,
+  ContentCopy as ContentCopyIcon,
+  HelpOutline as HelpOutlineIcon,
+  Save as SaveIcon,
+  UploadFile as UploadFileIcon,
+  Download as DownloadIcon,
+  AddCircleOutline as AddCircleOutlineIcon,
+  ExpandLess as ExpandLessIcon,
+  PlayArrow as PlayArrowIcon,
+} from '@mui/icons-material';
 import * as XLSX from 'xlsx';
 import { TOTP } from 'otpauth';
-import ContentCopyIcon from '@mui/icons-material/ContentCopy';
 import { authenticator } from 'otplib';
-
-interface Assertion {
-  field: string;
-  operator: string;
-  value: string;
-  type: string;
-  validationType?: 'value' | 'schema';
-  schema?: string;
-}
+import { DragDropContext, Droppable, Draggable, DropResult } from 'react-beautiful-dnd';
 
 interface ConfigFormData {
   baseUrl: string;
@@ -72,43 +74,12 @@ interface ConfigFormData {
   bearerToken: string;
   currentTotpCode: string;
   cookies: string;
-}
-
-export interface ApiRequest {
-  name: string;
-  method: string;
-  endpoint: string;
-  headers: string;
-  body: string;
-  expectedStatus: number;
-  suite: string;
-  assertions: Assertion[];
+  environment: string;
+  mfaRequest: MFARequest;
 }
 
 interface ExpandedState {
   [key: number]: boolean;
-}
-
-interface TestStatus {
-  name: string;
-  status: 'pending' | 'running' | 'passed' | 'failed';
-  duration: number;
-  suite: string;
-  logs: string;
-  method: string;
-  endpoint: string;
-  headers: string;
-  body: string;
-  expectedStatus: number;
-  isExpanded: boolean;
-  assertions?: Assertion[];
-  assertionResults?: {
-    field: string;
-    expected: string;
-    actual: any;
-    passed: boolean;
-    message: string;
-  }[];
 }
 
 interface Cookie {
@@ -126,21 +97,38 @@ interface TestCookies {
   cookies: Cookie[];
 }
 
-const defaultApiRequest: ApiRequest = {
-  name: '',
-  method: 'GET',
-  endpoint: '',
-  headers: '{}',
-  body: '{}',
-  expectedStatus: 200,
-  suite: 'regression',
-  assertions: [],
-};
+interface Environment {
+  name: string;
+  baseUrl: string;
+  parameters: { [key: string]: string };
+}
+
+interface MFAConfig {
+  enabled: boolean;
+  secretKey: string;
+  currentCode: string;
+  lastGenerated: number;
+  remainingTime: number;
+  error: string;
+  isValid: boolean;
+}
+
+interface MFARequest {
+  name: string;
+  method: string;
+  endpoint: string;
+  headers: string;
+  body: string;
+  expectedStatus: number;
+  responseVariables: Array<{ name: string; value: string }>;
+  cookieVariables: Array<{ name: string; cookieName: string }>;
+}
 
 const STORAGE_KEYS = {
   CONFIG: 'test_automation_config',
-  API_REQUESTS: 'test_automation_api_requests',
-  TEST_STATUS: 'test_automation_status'
+  TEST_STATUS: 'test_automation_status',
+  ENVIRONMENTS: 'test_automation_environments',
+  SELECTED_ENVIRONMENT: 'test_automation_selected_environment'
 };
 
 export const TEST_SUITES = {
@@ -155,12 +143,28 @@ const isValidBase32 = (str: string) => {
   return base32Regex.test(str.toUpperCase());
 };
 
+interface ExpandedSections {
+  basic: boolean;
+  mfa: boolean;
+  api: boolean;
+  cookies: boolean;
+  environment: boolean;
+}
+
+const defaultMfaRequest: MFARequest = {
+  name: 'MFA Request',
+  method: 'POST',
+  endpoint: '',
+  headers: '',
+  body: '',
+  expectedStatus: 200,
+  responseVariables: [],
+  cookieVariables: []
+};
+
 function ConfigurationPanel() {
   const { enqueueSnackbar } = useSnackbar();
   const [isSaving, setIsSaving] = useState(false);
-  const [apiRequests, setApiRequests] = useState<ApiRequest[]>([]);
-  const [isApiDialogOpen, setIsApiDialogOpen] = useState(false);
-  const [currentApiRequest, setCurrentApiRequest] = useState<ApiRequest>(defaultApiRequest);
   const [expanded, setExpanded] = useState<ExpandedState>({});
   const [isEditing, setIsEditing] = useState(false);
   const [editIndex, setEditIndex] = useState<number | null>(null);
@@ -169,6 +173,43 @@ function ConfigurationPanel() {
   const [testCookies, setTestCookies] = useState<TestCookies[]>([]);
   const [remainingTime, setRemainingTime] = useState<number>(30);
   const [mfaSecretError, setMfaSecretError] = useState<string>('');
+  const [environments, setEnvironments] = useState<Environment[]>([]);
+  const [selectedEnvironment, setSelectedEnvironment] = useState<string>('');
+  const [isEnvironmentDialogOpen, setIsEnvironmentDialogOpen] = useState(false);
+  const [currentEnvironment, setCurrentEnvironment] = useState<Environment>({
+    name: '',
+    baseUrl: '',
+    parameters: {}
+  });
+  const [expandedSections, setExpandedSections] = useState<ExpandedSections>({
+    basic: true,
+    mfa: true,
+    api: true,
+    cookies: true,
+    environment: true,
+  });
+  const [editingParamKey, setEditingParamKey] = useState<string | null>(null);
+  const [mfaConfig, setMfaConfig] = useState<MFAConfig>({
+    enabled: false,
+    secretKey: '',
+    currentCode: '',
+    lastGenerated: 0,
+    remainingTime: 30,
+    error: '',
+    isValid: false
+  });
+  const [mfaRequest, setMfaRequest] = useState<MFARequest>({
+    name: 'MFA Request',
+    method: 'POST',
+    endpoint: '',
+    headers: '',
+    body: '',
+    expectedStatus: 200,
+    responseVariables: [],
+    cookieVariables: []
+  });
+  const [storedResponseVariables, setStoredResponseVariables] = useState<Array<{ name: string; value: string }>>([]);
+  const [storedCookieVariables, setStoredCookieVariables] = useState<Array<{ name: string; cookieName: string }>>([]);
 
   const { control, handleSubmit, watch, reset } = useForm<ConfigFormData>({
     defaultValues: {
@@ -180,90 +221,133 @@ function ConfigurationPanel() {
       bearerToken: '',
       currentTotpCode: '',
       cookies: '',
+      environment: '',
+      mfaRequest: defaultMfaRequest,
     },
   });
 
   const bearerToken = watch('bearerToken');
+  const testUserEmail = watch('testUserEmail');
+  const testUserPassword = watch('testUserPassword');
+  const mfaEnabled = watch('mfaEnabled');
+  const mfaSecretKey = watch('mfaSecretKey');
 
+  // Load saved data on mount
   useEffect(() => {
     const loadSavedData = () => {
       try {
         const savedConfig = localStorage.getItem(STORAGE_KEYS.CONFIG);
-        const savedRequests = localStorage.getItem(STORAGE_KEYS.API_REQUESTS);
+        const savedEnvironments = localStorage.getItem(STORAGE_KEYS.ENVIRONMENTS);
 
         if (savedConfig) {
           const parsedConfig = JSON.parse(savedConfig);
           reset(parsedConfig);
         }
 
-        if (savedRequests) {
-          setApiRequests(JSON.parse(savedRequests));
+        if (savedEnvironments) {
+          const parsedEnvironments = JSON.parse(savedEnvironments);
+          setEnvironments(parsedEnvironments);
+          
+          // Load the last selected environment
+          const savedSelectedEnv = localStorage.getItem(STORAGE_KEYS.SELECTED_ENVIRONMENT);
+          if (savedSelectedEnv && parsedEnvironments.some((env: Environment) => env.name === savedSelectedEnv)) {
+            setSelectedEnvironment(savedSelectedEnv);
+          } else if (parsedEnvironments.length > 0) {
+            // If no saved selection or saved selection is invalid, select the first environment
+            setSelectedEnvironment(parsedEnvironments[0].name);
+            localStorage.setItem(STORAGE_KEYS.SELECTED_ENVIRONMENT, parsedEnvironments[0].name);
+          }
         }
       } catch (error) {
-        enqueueSnackbar('Error loading saved configuration', { variant: 'error' });
+        console.error('Error loading saved data:', error);
+        enqueueSnackbar('Error loading saved data', { variant: 'error' });
       }
     };
 
     loadSavedData();
   }, [reset, enqueueSnackbar]);
 
-  // Update TOTP generation effect
+  // Save selected environment when it changes
   useEffect(() => {
-    const mfaSecret = watch('mfaSecretKey');
-    console.log('MFA Secret changed:', mfaSecret); // Debug log
-
-    if (!mfaSecret) {
-      console.log('No MFA secret provided'); // Debug log
-      setCurrentTotpCode('');
-      return;
+    if (selectedEnvironment) {
+      localStorage.setItem(STORAGE_KEYS.SELECTED_ENVIRONMENT, selectedEnvironment);
     }
+  }, [selectedEnvironment]);
 
+  // Validate MFA secret key
+  const validateMfaSecret = (secret: string): boolean => {
+    if (!secret) return false;
+    // Check if secret is valid base32
+    const base32Regex = /^[A-Z2-7]+=*$/;
+    return base32Regex.test(secret.toUpperCase());
+  };
+
+  // Generate TOTP code
+  const generateTOTP = (secret: string): string => {
     try {
-      // Configure authenticator with basic settings
       authenticator.options = {
         window: 0,
         step: 30,
         digits: 6
       };
-      console.log('Authenticator configured with options:', authenticator.options); // Debug log
+      return authenticator.generate(secret);
+    } catch (error) {
+      console.error('TOTP generation error:', error);
+      return '';
+    }
+  };
 
-      // Generate TOTP directly with the secret
-      const totp = authenticator.generate(mfaSecret);
-      console.log('Successfully generated TOTP:', totp); // Debug log
-      setCurrentTotpCode(totp);
-      setLastGenerated(Date.now());
+  // Update TOTP code and timer
+  useEffect(() => {
+    let interval: NodeJS.Timeout;
+
+    if (mfaConfig.enabled && mfaConfig.secretKey) {
+      // Initial code generation
+      const code = generateTOTP(mfaConfig.secretKey);
+      setMfaConfig(prev => ({
+        ...prev,
+        currentCode: code,
+        lastGenerated: Date.now(),
+        isValid: true
+      }));
 
       // Set up timer for regeneration
-      const interval = setInterval(() => {
-        const newTotp = authenticator.generate(mfaSecret);
-        console.log('Regenerated new TOTP:', newTotp); // Debug log
-        setCurrentTotpCode(newTotp);
-        setLastGenerated(Date.now());
-      }, 30000);
+      interval = setInterval(() => {
+        const now = Date.now();
+        const elapsed = Math.floor((now - mfaConfig.lastGenerated) / 1000);
+        const remaining = 30 - (elapsed % 30);
 
-      return () => clearInterval(interval);
-    } catch (error) {
-      console.error('Failed to generate TOTP:', error); // Error log
-      setCurrentTotpCode('');
-      setMfaSecretError('Failed to generate TOTP code');
+        if (remaining === 30) {
+          const newCode = generateTOTP(mfaConfig.secretKey);
+          setMfaConfig(prev => ({
+            ...prev,
+            currentCode: newCode,
+            lastGenerated: now
+          }));
+        }
+
+        setMfaConfig(prev => ({
+          ...prev,
+          remainingTime: remaining
+        }));
+      }, 1000);
     }
-  }, [watch('mfaSecretKey')]);
 
-  // Add effect to clear error when secret changes
-  useEffect(() => {
-    setMfaSecretError('');
-  }, [watch('mfaSecretKey')]);
+    return () => {
+      if (interval) clearInterval(interval);
+    };
+  }, [mfaConfig.enabled, mfaConfig.secretKey]);
 
-  // Add remaining time display
-  useEffect(() => {
-    const timer = setInterval(() => {
-      const elapsed = Math.floor((Date.now() - lastGenerated) / 1000);
-      const remaining = 30 - (elapsed % 30);
-      setRemainingTime(remaining);
-    }, 1000);
-
-    return () => clearInterval(timer);
-  }, [lastGenerated]);
+  // Handle MFA secret key changes
+  const handleMfaSecretChange = (secret: string) => {
+    const isValid = validateMfaSecret(secret);
+    setMfaConfig(prev => ({
+      ...prev,
+      secretKey: secret,
+      isValid,
+      error: isValid ? '' : 'Invalid MFA secret key format'
+    }));
+  };
 
   // Listen for cookie updates from ExecutionPanel
   useEffect(() => {
@@ -272,10 +356,29 @@ function ConfigurationPanel() {
       setTestCookies(prevCookies => {
         const updatedCookies = [...prevCookies];
         const existingIndex = updatedCookies.findIndex(tc => tc.testName === 'mfa');
-        if (existingIndex >= 0) {
-          updatedCookies[existingIndex] = { testName: 'mfa', cookies };
-        } else {
-          updatedCookies.push({ testName: 'mfa', cookies });
+        try {
+          // Parse cookies string into key-value pairs
+          const cookiePairs = cookies.split(';').map(cookie => {
+            const [name, value] = cookie.trim().split('=');
+            return { name: name.trim(), value: value.trim() };
+          });
+
+          const parsedCookies: Cookie[] = cookiePairs.map(pair => ({
+            name: pair.name,
+            value: pair.value,
+            domain: window.location.hostname,
+            path: '/',
+            secure: true,
+            httpOnly: true
+          }));
+
+          if (existingIndex >= 0) {
+            updatedCookies[existingIndex] = { testName: 'mfa', cookies: parsedCookies };
+          } else {
+            updatedCookies.push({ testName: 'mfa', cookies: parsedCookies });
+          }
+        } catch (error) {
+          console.error('Error parsing cookies:', error);
         }
         return updatedCookies;
       });
@@ -305,6 +408,23 @@ function ConfigurationPanel() {
     }
   }, []);
 
+  // Add this useEffect to load stored variables
+  useEffect(() => {
+    const loadStoredVariables = () => {
+      const savedResponseVars = localStorage.getItem('stored_response_variables');
+      const savedCookieVars = localStorage.getItem('stored_cookie_variables');
+      
+      if (savedResponseVars) {
+        setStoredResponseVariables(JSON.parse(savedResponseVars));
+      }
+      if (savedCookieVars) {
+        setStoredCookieVariables(JSON.parse(savedCookieVars));
+      }
+    };
+
+    loadStoredVariables();
+  }, []);
+
   const onSubmit = async (data: ConfigFormData) => {
     setIsSaving(true);
     try {
@@ -314,145 +434,6 @@ function ConfigurationPanel() {
       enqueueSnackbar('Error saving configuration', { variant: 'error' });
     } finally {
       setIsSaving(false);
-    }
-  };
-
-  const handleApiDialogOpen = () => {
-    setCurrentApiRequest(defaultApiRequest);
-    setIsEditing(false);
-    setEditIndex(null);
-    setIsApiDialogOpen(true);
-  };
-
-  const handleApiDialogClose = () => {
-    setIsApiDialogOpen(false);
-  };
-
-  const handleEditApiRequest = (index: number) => {
-    const requestToEdit = apiRequests[index];
-    setCurrentApiRequest({
-      ...requestToEdit,
-      assertions: requestToEdit.assertions?.map(assertion => ({
-        ...assertion,
-        validationType: assertion.validationType || 'value',
-        schema: assertion.schema || ''
-      })) || []
-    });
-    setIsEditing(true);
-    setEditIndex(index);
-    setIsApiDialogOpen(true);
-
-    // Dispatch event to notify other components
-    window.dispatchEvent(new CustomEvent('test_request_edit', {
-      detail: { name: requestToEdit.name }
-    }));
-  };
-
-  const handleApiRequestSave = () => {
-    if (currentApiRequest.name && currentApiRequest.endpoint) {
-      try {
-        // Validate schema if schema validation is selected
-        const assertions = currentApiRequest.assertions?.map(assertion => {
-          if (assertion.validationType === 'schema' && assertion.schema) {
-            try {
-              // Validate JSON schema format
-              JSON.parse(assertion.schema);
-              return {
-                ...assertion,
-                schema: assertion.schema
-              };
-            } catch (error) {
-              throw new Error(`Invalid JSON Schema in assertion for field ${assertion.field}: ${error instanceof Error ? error.message : String(error)}`);
-            }
-          }
-          return assertion;
-        }) || [];
-
-        // Check for response variables in the body and headers
-        const bodyWithVariables = replaceResponseVariables(currentApiRequest.body);
-        const headersWithVariables = replaceResponseVariables(currentApiRequest.headers);
-
-        const newRequest: ApiRequest = {
-          name: currentApiRequest.name,
-          method: currentApiRequest.method,
-          endpoint: currentApiRequest.endpoint,
-          headers: headersWithVariables,
-          body: bodyWithVariables,
-          expectedStatus: currentApiRequest.expectedStatus,
-          suite: currentApiRequest.suite,
-          assertions
-        };
-
-        const savedRequests = localStorage.getItem(STORAGE_KEYS.API_REQUESTS);
-        const requests: ApiRequest[] = savedRequests ? JSON.parse(savedRequests) : [];
-        
-        const existingIndex = requests.findIndex(r => r.name === newRequest.name);
-        if (existingIndex >= 0) {
-          requests[existingIndex] = newRequest;
-        } else {
-          requests.push(newRequest);
-        }
-
-        // Update both localStorage and state
-        localStorage.setItem(STORAGE_KEYS.API_REQUESTS, JSON.stringify(requests));
-        setApiRequests(requests);
-
-        // Also update test status if it exists
-        const savedStatus = localStorage.getItem(STORAGE_KEYS.TEST_STATUS);
-        if (savedStatus) {
-          const status: TestStatus[] = JSON.parse(savedStatus);
-          const existingStatusIndex = status.findIndex(s => s.name === newRequest.name);
-          if (existingStatusIndex >= 0) {
-            status[existingStatusIndex] = {
-              ...status[existingStatusIndex],
-              method: newRequest.method,
-              endpoint: newRequest.endpoint,
-              headers: newRequest.headers,
-              body: newRequest.body,
-              expectedStatus: newRequest.expectedStatus,
-              suite: newRequest.suite,
-              assertions: newRequest.assertions || []
-            };
-            localStorage.setItem(STORAGE_KEYS.TEST_STATUS, JSON.stringify(status));
-          }
-        }
-
-        setIsApiDialogOpen(false);
-        setCurrentApiRequest(defaultApiRequest);
-        enqueueSnackbar('Test request saved successfully', { variant: 'success' });
-      } catch (error) {
-        console.error('Error saving test request:', error);
-        enqueueSnackbar(error instanceof Error ? error.message : 'Error saving test request', { variant: 'error' });
-      }
-    } else {
-      enqueueSnackbar('Please fill in all required fields', { variant: 'warning' });
-    }
-  };
-
-  const replaceResponseVariables = (content: string): string => {
-    // Replace variables in format ${response.testName.field}
-    return content.replace(/\${response\.([^.]+)\.([^}]+)}/g, (match, testName, field) => {
-      try {
-        const storedResponse = localStorage.getItem(`response_${testName}`);
-        if (storedResponse) {
-          const responseData = JSON.parse(storedResponse);
-          return responseData[field] || match;
-        }
-      } catch (error) {
-        console.error(`Error accessing stored response for ${testName}:`, error);
-      }
-      return match;
-    });
-  };
-
-  const handleDeleteApiRequest = (index: number) => {
-    try {
-      const updatedRequests = apiRequests.filter((_, i) => i !== index);
-      setApiRequests(updatedRequests);
-      localStorage.setItem(STORAGE_KEYS.API_REQUESTS, JSON.stringify(updatedRequests));
-      enqueueSnackbar('API request deleted successfully', { variant: 'success' });
-    } catch (error) {
-      enqueueSnackbar('Error deleting API request', { variant: 'error' });
     }
   };
 
@@ -473,54 +454,152 @@ function ConfigurationPanel() {
     return colors[suite] || 'default';
   };
 
-  const downloadTemplate = () => {
-    try {
-      const template = [
-        {
-          name: 'Example GET Request',
-          method: 'GET',
-          endpoint: '/api/example',
-          headers: '{"Authorization": "Bearer ${token}"}',
-          body: '{}',
-          expectedStatus: 200,
-          suite: TEST_SUITES.REGRESSION,
-        },
-      ];
+  const handleEnvironmentDialogOpen = () => {
+    setCurrentEnvironment({
+      name: '',
+      baseUrl: '',
+      parameters: {}
+    });
+    setIsEnvironmentDialogOpen(true);
+  };
 
-      const ws = XLSX.utils.json_to_sheet(template);
-      const wb = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(wb, ws, 'API Requests');
-      XLSX.writeFile(wb, 'api-requests-template.xlsx');
-      enqueueSnackbar('Template downloaded successfully', { variant: 'success' });
-    } catch (error) {
-      enqueueSnackbar('Error downloading template', { variant: 'error' });
+  const handleEnvironmentDialogClose = () => {
+    setIsEnvironmentDialogOpen(false);
+  };
+
+  const handleEnvironmentSave = () => {
+    if (currentEnvironment.name && currentEnvironment.baseUrl) {
+      try {
+        const updatedEnvironments = [...environments];
+        const existingIndex = updatedEnvironments.findIndex(env => env.name === currentEnvironment.name);
+        
+        if (existingIndex >= 0) {
+          updatedEnvironments[existingIndex] = currentEnvironment;
+        } else {
+          updatedEnvironments.push(currentEnvironment);
+        }
+
+        setEnvironments(updatedEnvironments);
+        localStorage.setItem(STORAGE_KEYS.ENVIRONMENTS, JSON.stringify(updatedEnvironments));
+        
+        if (!selectedEnvironment) {
+          setSelectedEnvironment(currentEnvironment.name);
+        }
+
+        setIsEnvironmentDialogOpen(false);
+        enqueueSnackbar('Environment saved successfully', { variant: 'success' });
+      } catch (error) {
+        enqueueSnackbar('Error saving environment', { variant: 'error' });
+      }
+    } else {
+      enqueueSnackbar('Please fill in all required fields', { variant: 'warning' });
     }
   };
 
-  const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (file) {
-      try {
-        const reader = new FileReader();
-        reader.onload = (e) => {
-          try {
-            const data = new Uint8Array(e.target?.result as ArrayBuffer);
-            const workbook = XLSX.read(data, { type: 'array' });
-            const worksheet = workbook.Sheets[workbook.SheetNames[0]];
-            const jsonData = XLSX.utils.sheet_to_json<ApiRequest>(worksheet);
-            const updatedRequests = [...apiRequests, ...jsonData];
-            setApiRequests(updatedRequests);
-            localStorage.setItem(STORAGE_KEYS.API_REQUESTS, JSON.stringify(updatedRequests));
-            enqueueSnackbar('API requests imported successfully', { variant: 'success' });
-          } catch (error) {
-            enqueueSnackbar('Error parsing Excel file', { variant: 'error' });
-          }
-        };
-        reader.readAsArrayBuffer(file);
-      } catch (error) {
-        enqueueSnackbar('Error reading file', { variant: 'error' });
+  const handleEnvironmentDelete = (name: string) => {
+    try {
+      const updatedEnvironments = environments.filter(env => env.name !== name);
+      setEnvironments(updatedEnvironments);
+      localStorage.setItem(STORAGE_KEYS.ENVIRONMENTS, JSON.stringify(updatedEnvironments));
+      
+      if (selectedEnvironment === name) {
+        setSelectedEnvironment(updatedEnvironments.length > 0 ? updatedEnvironments[0].name : '');
       }
+      
+      enqueueSnackbar('Environment deleted successfully', { variant: 'success' });
+    } catch (error) {
+      enqueueSnackbar('Error deleting environment', { variant: 'error' });
     }
+  };
+
+  const handleEnvironmentEdit = (environment: Environment) => {
+    setCurrentEnvironment(environment);
+    setIsEnvironmentDialogOpen(true);
+  };
+
+  const handleEnvironmentChange = (event: SelectChangeEvent) => {
+    const newEnvironment = event.target.value;
+    setSelectedEnvironment(newEnvironment);
+    localStorage.setItem(STORAGE_KEYS.SELECTED_ENVIRONMENT, newEnvironment);
+  };
+
+  const handleSectionToggle = (section: keyof ExpandedSections) => {
+    setExpandedSections(prev => ({
+      ...prev,
+      [section]: !prev[section]
+    }));
+  };
+
+  const handleMfaRequestRun = async () => {
+    try {
+      const response: Response = await fetch(mfaRequest.endpoint, {
+        method: mfaRequest.method,
+        headers: JSON.parse(mfaRequest.headers || '{}'),
+        body: mfaRequest.body ? JSON.parse(mfaRequest.body) : undefined
+      });
+
+      if (response.status === mfaRequest.expectedStatus) {
+        const responseData: Record<string, unknown> = await response.json();
+        
+        // Store response data in localStorage
+        localStorage.setItem('mfa_response', JSON.stringify(responseData));
+
+        // Store cookies in localStorage
+        const cookies = response.headers.get('set-cookie');
+        localStorage.setItem('mfa_cookies', JSON.stringify(cookies));
+
+        setMfaRequest(prev => ({
+          ...prev,
+          responseVariables: Object.entries(responseData).map(([name, value]) => ({ 
+            name, 
+            value: typeof value === 'string' ? value : JSON.stringify(value)
+          })),
+          cookieVariables: cookies?.split(';').map((cookie: string) => {
+            const [name, value] = cookie.split('=');
+            return { name: name.trim(), cookieName: value.trim() };
+          }) || []
+        }));
+
+        enqueueSnackbar('MFA request executed successfully', { variant: 'success' });
+      } else {
+        throw new Error(`Expected status ${mfaRequest.expectedStatus}, got ${response.status}`);
+      }
+    } catch (error) {
+      console.error('Error running MFA request:', error);
+      enqueueSnackbar(error instanceof Error ? error.message : 'Error running MFA request', { variant: 'error' });
+    }
+  };
+
+  const handleStoreResponseVariable = (variable: { name: string; value: string }) => {
+    const savedVariables = localStorage.getItem('stored_response_variables') || '[]';
+    const variables = JSON.parse(savedVariables);
+    variables.push(variable);
+    localStorage.setItem('stored_response_variables', JSON.stringify(variables));
+    enqueueSnackbar('Response variable stored successfully', { variant: 'success' });
+  };
+
+  const handleStoreCookieVariable = (variable: { name: string; cookieName: string }) => {
+    const savedVariables = localStorage.getItem('stored_cookie_variables') || '[]';
+    const variables = JSON.parse(savedVariables);
+    variables.push(variable);
+    localStorage.setItem('stored_cookie_variables', JSON.stringify(variables));
+    enqueueSnackbar('Cookie variable stored successfully', { variant: 'success' });
+  };
+
+  // Add this function to remove stored variables
+  const handleRemoveStoredVariable = (type: 'response' | 'cookie', index: number) => {
+    if (type === 'response') {
+      const updatedVars = [...storedResponseVariables];
+      updatedVars.splice(index, 1);
+      setStoredResponseVariables(updatedVars);
+      localStorage.setItem('stored_response_variables', JSON.stringify(updatedVars));
+    } else {
+      const updatedVars = [...storedCookieVariables];
+      updatedVars.splice(index, 1);
+      setStoredCookieVariables(updatedVars);
+      localStorage.setItem('stored_cookie_variables', JSON.stringify(updatedVars));
+    }
+    enqueueSnackbar('Variable removed successfully', { variant: 'success' });
   };
 
   return (
@@ -530,138 +609,31 @@ function ConfigurationPanel() {
       transition={{ duration: 0.5 }}
     >
       <Box component="form" onSubmit={handleSubmit(onSubmit)} sx={{ mt: 2 }}>
-        <Typography variant="h5" gutterBottom sx={{ color: 'primary.main', fontWeight: 'bold' }}>
-          Test Configuration
-        </Typography>
-        
-        <Card sx={{ mb: 4, bgcolor: 'background.paper' }}>
-          <CardContent>
-            <Typography variant="h6" gutterBottom color="text.secondary">
-              Basic Settings
-            </Typography>
-            
-            <Grid container spacing={3}>
-              <Grid item xs={12}>
-                <Controller
-                  name="baseUrl"
-                  control={control}
-                  render={({ field }) => (
-                    <Box sx={{ display: 'flex', alignItems: 'center' }}>
-                      <TextField
-                        {...field}
-                        fullWidth
-                        required
-                        label="Base URL"
-                        variant="outlined"
-                        sx={{ '& .MuiOutlinedInput-root': { borderRadius: 2 } }}
-                      />
-                      <Tooltip title="The base URL for your API endpoints">
-                        <IconButton sx={{ ml: 1 }}>
-                          <HelpOutlineIcon />
-                        </IconButton>
-                      </Tooltip>
-                    </Box>
-                  )}
-                />
-              </Grid>
-
-              <Grid item xs={12}>
-                <Controller
-                  name="bearerToken"
-                  control={control}
-                  render={({ field }) => (
-                    <TextField
-                      {...field}
-                      fullWidth
-                      label="Bearer Token"
-                      variant="outlined"
-                      sx={{ '& .MuiOutlinedInput-root': { borderRadius: 2 } }}
-                    />
-                  )}
-                />
-              </Grid>
-
-              <Grid item xs={12} md={6}>
-                <Controller
-                  name="testUserEmail"
-                  control={control}
-                  render={({ field }) => (
-                    <TextField
-                      {...field}
-                      fullWidth
-                      required
-                      label="Test User Email"
-                      variant="outlined"
-                      sx={{ '& .MuiOutlinedInput-root': { borderRadius: 2 } }}
-                    />
-                  )}
-                />
-              </Grid>
-
-              <Grid item xs={12} md={6}>
-                <Controller
-                  name="testUserPassword"
-                  control={control}
-                  render={({ field }) => (
-                    <TextField
-                      {...field}
-                      fullWidth
-                      required
-                      label="Test User Password"
-                      type="password"
-                      variant="outlined"
-                      sx={{ '& .MuiOutlinedInput-root': { borderRadius: 2 } }}
-                    />
-                  )}
-                />
-              </Grid>
-            </Grid>
-          </CardContent>
-        </Card>
-
-        <Card sx={{ mb: 4 }}>
-          <CardContent>
-            <Typography variant="h6" gutterBottom color="text.secondary">
-              MFA Configuration
-            </Typography>
-            
-            <Grid container spacing={3}>
-              <Grid item xs={12}>
-                <FormControlLabel
-                  control={
-                    <Controller
-                      name="mfaEnabled"
-                      control={control}
-                      render={({ field }) => (
-                        <Switch
-                          checked={field.value}
-                          onChange={field.onChange}
-                        />
-                      )}
-                    />
-                  }
-                  label="Enable MFA"
-                />
-              </Grid>
-
-              {watch('mfaEnabled') && (
-                <>
+        <Grid container spacing={3}>
+          {/* Left Column - Basic Settings and MFA */}
+          <Grid item xs={12} md={6}>
+            <Card sx={{ mb: 3 }}>
+              <CardContent>
+                <Typography variant="h6" gutterBottom sx={{ color: 'primary.main', fontWeight: 'bold' }}>
+                  Basic Settings
+                </Typography>
+                <Grid container spacing={2}>
                   <Grid item xs={12}>
                     <Controller
-                      name="mfaSecretKey"
+                      name="baseUrl"
                       control={control}
                       render={({ field }) => (
                         <Box sx={{ display: 'flex', alignItems: 'center' }}>
                           <TextField
                             {...field}
                             fullWidth
-                            label="MFA Secret Key"
-                            type="password"
+                            required
+                            label="Base URL"
                             variant="outlined"
-                            helperText="Enter your MFA secret key"
+                            size="small"
                             sx={{ '& .MuiOutlinedInput-root': { borderRadius: 2 } }}
                           />
-                          <Tooltip title="Your MFA secret key for generating TOTP codes">
+                          <Tooltip title="The base URL for your API endpoints">
                             <IconButton sx={{ ml: 1 }}>
                               <HelpOutlineIcon />
                             </IconButton>
@@ -670,275 +642,549 @@ function ConfigurationPanel() {
                       )}
                     />
                   </Grid>
-                  
-                  {watch('mfaSecretKey') && (
-                    <Grid item xs={12}>
-                      <Card variant="outlined">
-                        <CardContent>
-                          <Typography variant="h6" gutterBottom>
-                            Current TOTP Code
-                          </Typography>
-                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-                            <Typography variant="h4" sx={{ fontFamily: 'monospace' }}>
-                              {currentTotpCode}
-                            </Typography>
-                            <IconButton
-                              onClick={() => {
-                                navigator.clipboard.writeText(currentTotpCode);
-                                enqueueSnackbar('TOTP code copied to clipboard', { variant: 'success' });
-                              }}
-                            >
-                              <ContentCopyIcon />
-                            </IconButton>
-                            <CircularProgress
-                              variant="determinate"
-                              value={(remainingTime / 30) * 100}
-                              size={24}
-                              sx={{ ml: 'auto' }}
-                            />
-                            <Typography variant="body2" color="text.secondary">
-                              {remainingTime}s
-                            </Typography>
-                          </Box>
-                        </CardContent>
-                      </Card>
-                    </Grid>
-                  )}
 
                   <Grid item xs={12}>
                     <Controller
-                      name="cookies"
+                      name="bearerToken"
                       control={control}
                       render={({ field }) => (
                         <TextField
                           {...field}
                           fullWidth
-                          label="Cookies"
-                          multiline
-                          rows={4}
-                          helperText="Cookies will be automatically captured after MFA login"
-                          InputProps={{
-                            readOnly: true,
-                            endAdornment: (
-                              <IconButton
-                                onClick={() => {
-                                  navigator.clipboard.writeText(field.value);
-                                  enqueueSnackbar('Cookies copied to clipboard', { variant: 'success' });
-                                }}
-                              >
-                                <ContentCopyIcon />
-                              </IconButton>
-                            )
-                          }}
+                          label="Bearer Token"
+                          variant="outlined"
+                          size="small"
+                          sx={{ '& .MuiOutlinedInput-root': { borderRadius: 2 } }}
                         />
                       )}
                     />
                   </Grid>
-                </>
-              )}
-            </Grid>
-          </CardContent>
-        </Card>
 
-        <Card sx={{ mb: 4 }}>
-          <CardContent>
-            <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
-              <Typography variant="h6" color="text.secondary">
-                API Requests Configuration
-              </Typography>
-              <Box>
-                <Button
-                  variant="outlined"
-                  startIcon={<DownloadIcon />}
-                  onClick={downloadTemplate}
-                  sx={{ mr: 2 }}
-                >
-                  Download Template
-                </Button>
-                <Button
-                  variant="outlined"
-                  component="label"
-                  startIcon={<UploadFileIcon />}
-                  sx={{ mr: 2 }}
-                >
-                  Import Excel
-                  <input
-                    type="file"
-                    hidden
-                    accept=".xlsx,.xls"
-                    onChange={handleFileUpload}
-                  />
-                </Button>
-                <Button
-                  variant="contained"
-                  startIcon={<AddIcon />}
-                  onClick={handleApiDialogOpen}
-                >
-                  Add Request
-                </Button>
-              </Box>
-            </Box>
+                  <Grid item xs={12} md={6}>
+                    <Controller
+                      name="testUserEmail"
+                      control={control}
+                      render={({ field }) => (
+                        <TextField
+                          {...field}
+                          fullWidth
+                          required
+                          label="Test User Email"
+                          variant="outlined"
+                          size="small"
+                          sx={{ '& .MuiOutlinedInput-root': { borderRadius: 2 } }}
+                        />
+                      )}
+                    />
+                  </Grid>
 
-            <TableContainer component={Paper} sx={{ mt: 2 }}>
-              <Table>
-                <TableHead>
-                  <TableRow>
-                    <TableCell width="40px"></TableCell>
-                    <TableCell>Name</TableCell>
-                    <TableCell>Method</TableCell>
-                    <TableCell>Endpoint</TableCell>
-                    <TableCell>Suite</TableCell>
-                    <TableCell>Expected Status</TableCell>
-                    <TableCell>Actions</TableCell>
-                  </TableRow>
-                </TableHead>
-                <TableBody>
-                  {apiRequests.map((request, index) => (
-                    <React.Fragment key={index}>
-                      <TableRow>
-                        <TableCell>
-                          <IconButton size="small" onClick={() => toggleExpand(index)}>
-                            {expanded[index] ? <ExpandLessIcon /> : <ExpandMoreIcon />}
-                          </IconButton>
-                        </TableCell>
-                        <TableCell>{request.name}</TableCell>
-                        <TableCell>{request.method}</TableCell>
-                        <TableCell>{request.endpoint}</TableCell>
-                        <TableCell>
-                          <Chip 
-                            label={request.suite} 
-                            color={getSuiteColor(request.suite) as any}
-                            size="small"
-                          />
-                        </TableCell>
-                        <TableCell>{request.expectedStatus}</TableCell>
-                        <TableCell>
-                          <Box sx={{ display: 'flex', gap: 1 }}>
-                            <IconButton
-                              color="primary"
-                              onClick={() => handleEditApiRequest(index)}
-                            >
-                              <EditIcon />
-                            </IconButton>
-                            <IconButton
-                              color="error"
-                              onClick={() => handleDeleteApiRequest(index)}
-                            >
-                              <DeleteIcon />
-                            </IconButton>
-                          </Box>
-                        </TableCell>
-                      </TableRow>
-                      <TableRow>
-                        <TableCell style={{ paddingBottom: 0, paddingTop: 0 }} colSpan={7}>
-                          <Collapse in={expanded[index]} timeout="auto" unmountOnExit>
-                            <Box sx={{ margin: 1 }}>
-                              <Typography variant="h6" gutterBottom component="div">
-                                Request Details
-                              </Typography>
-                              <Grid container spacing={2}>
-                                <Grid item xs={12} md={6}>
-                                  <Typography variant="subtitle2">Headers:</Typography>
-                                  <pre style={{ 
-                                    backgroundColor: '#f5f5f5',
-                                    padding: '10px',
-                                    borderRadius: '4px',
-                                    overflow: 'auto'
-                                  }}>
-                                    {request.headers}
-                                  </pre>
-                                </Grid>
-                                <Grid item xs={12} md={6}>
-                                  <Typography variant="subtitle2">Body:</Typography>
-                                  <pre style={{ 
-                                    backgroundColor: '#f5f5f5',
-                                    padding: '10px',
-                                    borderRadius: '4px',
-                                    overflow: 'auto'
-                                  }}>
-                                    {request.body}
-                                  </pre>
-                                </Grid>
-                              </Grid>
+                  <Grid item xs={12} md={6}>
+                    <Controller
+                      name="testUserPassword"
+                      control={control}
+                      render={({ field }) => (
+                        <TextField
+                          {...field}
+                          fullWidth
+                          required
+                          label="Test User Password"
+                          type="password"
+                          variant="outlined"
+                          size="small"
+                          sx={{ '& .MuiOutlinedInput-root': { borderRadius: 2 } }}
+                        />
+                      )}
+                    />
+                  </Grid>
+                </Grid>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardContent>
+                <Typography variant="h6" gutterBottom sx={{ color: 'primary.main', fontWeight: 'bold' }}>
+                  MFA Configuration
+                </Typography>
+                <Grid container spacing={2}>
+                  <Grid item xs={12}>
+                    <FormControlLabel
+                      control={
+                        <Controller
+                          name="mfaEnabled"
+                          control={control}
+                          render={({ field }) => (
+                            <Switch
+                              checked={field.value}
+                              onChange={(e) => {
+                                field.onChange(e);
+                                setMfaConfig(prev => ({
+                                  ...prev,
+                                  enabled: e.target.checked
+                                }));
+                              }}
+                            />
+                          )}
+                        />
+                      }
+                      label="Enable MFA"
+                    />
+                  </Grid>
+
+                  {watch('mfaEnabled') && (
+                    <>
+                      <Grid item xs={12}>
+                        <Controller
+                          name="mfaSecretKey"
+                          control={control}
+                          render={({ field }) => (
+                            <Box sx={{ display: 'flex', alignItems: 'center' }}>
+                              <TextField
+                                {...field}
+                                fullWidth
+                                label="MFA Secret Key"
+                                type="password"
+                                variant="outlined"
+                                size="small"
+                                error={!!mfaConfig.error}
+                                helperText={mfaConfig.error || "Enter your MFA secret key"}
+                                onChange={(e) => {
+                                  field.onChange(e);
+                                  handleMfaSecretChange(e.target.value);
+                                }}
+                              />
+                              <Tooltip title="Your MFA secret key for generating TOTP codes">
+                                <IconButton sx={{ ml: 1 }}>
+                                  <HelpOutlineIcon />
+                                </IconButton>
+                              </Tooltip>
                             </Box>
-                          </Collapse>
-                        </TableCell>
-                      </TableRow>
-                    </React.Fragment>
-                  ))}
-                </TableBody>
-              </Table>
-            </TableContainer>
-          </CardContent>
-        </Card>
+                          )}
+                        />
+                      </Grid>
 
-        {testCookies.length > 0 && (
-          <Card sx={{ mb: 4 }}>
-            <CardContent>
-              <Typography variant="h6" gutterBottom color="text.secondary">
-                Test Cookies
-              </Typography>
-              <Grid container spacing={3}>
-                {testCookies.map((testCookie) => (
-                  <Grid item xs={12} key={testCookie.testName}>
-                    <Accordion>
-                      <AccordionSummary expandIcon={<ExpandMoreIcon />}>
-                        <Typography>{testCookie.testName}</Typography>
-                      </AccordionSummary>
-                      <AccordionDetails>
-                        <TableContainer component={Paper}>
-                          <Table size="small">
-                            <TableHead>
-                              <TableRow>
-                                <TableCell>Name</TableCell>
-                                <TableCell>Value</TableCell>
-                                <TableCell>Domain</TableCell>
-                                <TableCell>Path</TableCell>
-                                <TableCell>Expires</TableCell>
-                                <TableCell>Secure</TableCell>
-                                <TableCell>HttpOnly</TableCell>
-                              </TableRow>
-                            </TableHead>
-                            <TableBody>
-                              {testCookie.cookies.map((cookie, index) => (
-                                <TableRow key={index}>
-                                  <TableCell>{cookie.name}</TableCell>
-                                  <TableCell>
-                                    <Box sx={{ display: 'flex', alignItems: 'center' }}>
-                                      <Typography sx={{ fontFamily: 'monospace' }}>
-                                        {cookie.value}
-                                      </Typography>
-                                      <IconButton
+                      {mfaConfig.secretKey && mfaConfig.isValid && (
+                        <Grid item xs={12}>
+                          <Card variant="outlined">
+                            <CardContent>
+                              <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                                <Typography variant="subtitle1">
+                                  Current TOTP Code
+                                </Typography>
+                                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                  <Typography variant="h6" sx={{ fontFamily: 'monospace' }}>
+                                    {mfaConfig.currentCode}
+                                  </Typography>
+                                  <IconButton
+                                    size="small"
+                                    onClick={() => {
+                                      navigator.clipboard.writeText(mfaConfig.currentCode);
+                                      enqueueSnackbar('TOTP code copied to clipboard', { variant: 'success' });
+                                    }}
+                                  >
+                                    <ContentCopyIcon fontSize="small" />
+                                  </IconButton>
+                                  <CircularProgress
+                                    variant="determinate"
+                                    value={(mfaConfig.remainingTime / 30) * 100}
+                                    size={20}
+                                  />
+                                  <Typography variant="caption" color="text.secondary">
+                                    {mfaConfig.remainingTime}s
+                                  </Typography>
+                                </Box>
+                              </Box>
+                            </CardContent>
+                          </Card>
+                        </Grid>
+                      )}
+
+                      {/* MFA Request Configuration */}
+                      <Grid item xs={12}>
+                        <Divider sx={{ my: 2 }} />
+                        <Typography variant="subtitle1" gutterBottom sx={{ color: 'primary.main' }}>
+                          MFA Request Configuration
+                        </Typography>
+                      </Grid>
+
+                      <Grid item xs={12}>
+                        <TextField
+                          fullWidth
+                          size="small"
+                          label="Request Name"
+                          value={mfaRequest.name}
+                          onChange={(e) => setMfaRequest(prev => ({ ...prev, name: e.target.value }))}
+                        />
+                      </Grid>
+
+                      <Grid item xs={12} sm={6}>
+                        <FormControl fullWidth size="small">
+                          <InputLabel>Method</InputLabel>
+                          <Select
+                            value={mfaRequest.method}
+                            label="Method"
+                            onChange={(e) => setMfaRequest(prev => ({ ...prev, method: e.target.value }))}
+                          >
+                            <MenuItem value="POST">POST</MenuItem>
+                            <MenuItem value="PUT">PUT</MenuItem>
+                          </Select>
+                        </FormControl>
+                      </Grid>
+
+                      <Grid item xs={12} sm={6}>
+                        <TextField
+                          fullWidth
+                          size="small"
+                          label="Expected Status"
+                          type="number"
+                          value={mfaRequest.expectedStatus}
+                          onChange={(e) => setMfaRequest(prev => ({ ...prev, expectedStatus: parseInt(e.target.value) }))}
+                        />
+                      </Grid>
+
+                      <Grid item xs={12}>
+                        <TextField
+                          fullWidth
+                          size="small"
+                          label="Endpoint"
+                          value={mfaRequest.endpoint}
+                          onChange={(e) => setMfaRequest(prev => ({ ...prev, endpoint: e.target.value }))}
+                          helperText="Use {totpCode} to reference the current TOTP code"
+                        />
+                      </Grid>
+
+                      <Grid item xs={12}>
+                        <TextField
+                          fullWidth
+                          size="small"
+                          label="Headers"
+                          multiline
+                          rows={3}
+                          value={mfaRequest.headers}
+                          onChange={(e) => setMfaRequest(prev => ({ ...prev, headers: e.target.value }))}
+                          helperText="Enter headers in JSON format"
+                        />
+                      </Grid>
+
+                      <Grid item xs={12}>
+                        <TextField
+                          fullWidth
+                          size="small"
+                          label="Request Body"
+                          multiline
+                          rows={3}
+                          value={mfaRequest.body}
+                          onChange={(e) => setMfaRequest(prev => ({ ...prev, body: e.target.value }))}
+                          helperText="Enter request body in JSON format. Use {totpCode} to reference the current TOTP code"
+                        />
+                      </Grid>
+
+                      <Grid item xs={12}>
+                        <Button
+                          variant="contained"
+                          size="small"
+                          color="primary"
+                          onClick={handleMfaRequestRun}
+                          startIcon={<PlayArrowIcon />}
+                        >
+                          Run MFA Request
+                        </Button>
+                      </Grid>
+
+                      {/* Response Variables Section */}
+                      {mfaRequest.responseVariables.length > 0 && (
+                        <Grid item xs={12}>
+                          <Typography variant="subtitle1" gutterBottom>
+                            Response Variables
+                          </Typography>
+                          <TableContainer component={Paper} variant="outlined">
+                            <Table size="small">
+                              <TableHead>
+                                <TableRow>
+                                  <TableCell>Name</TableCell>
+                                  <TableCell>Value</TableCell>
+                                  <TableCell>Actions</TableCell>
+                                </TableRow>
+                              </TableHead>
+                              <TableBody>
+                                {mfaRequest.responseVariables.map((variable, index) => (
+                                  <TableRow key={index}>
+                                    <TableCell>{variable.name}</TableCell>
+                                    <TableCell>
+                                      <Box sx={{ display: 'flex', alignItems: 'center' }}>
+                                        <Typography sx={{ fontFamily: 'monospace' }}>
+                                          {variable.value}
+                                        </Typography>
+                                        <IconButton
+                                          size="small"
+                                          onClick={() => {
+                                            navigator.clipboard.writeText(variable.value);
+                                            enqueueSnackbar('Value copied to clipboard', { variant: 'success' });
+                                          }}
+                                        >
+                                          <ContentCopyIcon fontSize="small" />
+                                        </IconButton>
+                                      </Box>
+                                    </TableCell>
+                                    <TableCell>
+                                      <Button
                                         size="small"
-                                        onClick={() => {
-                                          navigator.clipboard.writeText(cookie.value);
-                                          enqueueSnackbar('Cookie value copied to clipboard', { variant: 'success' });
-                                        }}
+                                        variant="outlined"
+                                        onClick={() => handleStoreResponseVariable(variable)}
                                       >
-                                        <ContentCopyIcon fontSize="small" />
-                                      </IconButton>
-                                    </Box>
+                                        Store Variable
+                                      </Button>
+                                    </TableCell>
+                                  </TableRow>
+                                ))}
+                              </TableBody>
+                            </Table>
+                          </TableContainer>
+                        </Grid>
+                      )}
+
+                      {/* Cookie Variables Section */}
+                      {mfaRequest.cookieVariables.length > 0 && (
+                        <Grid item xs={12}>
+                          <Typography variant="subtitle1" gutterBottom>
+                            Cookie Variables
+                          </Typography>
+                          <TableContainer component={Paper} variant="outlined">
+                            <Table size="small">
+                              <TableHead>
+                                <TableRow>
+                                  <TableCell>Name</TableCell>
+                                  <TableCell>Cookie Name</TableCell>
+                                  <TableCell>Actions</TableCell>
+                                </TableRow>
+                              </TableHead>
+                              <TableBody>
+                                {mfaRequest.cookieVariables.map((variable, index) => (
+                                  <TableRow key={index}>
+                                    <TableCell>{variable.name}</TableCell>
+                                    <TableCell>
+                                      <Box sx={{ display: 'flex', alignItems: 'center' }}>
+                                        <Typography sx={{ fontFamily: 'monospace' }}>
+                                          {variable.cookieName}
+                                        </Typography>
+                                        <IconButton
+                                          size="small"
+                                          onClick={() => {
+                                            navigator.clipboard.writeText(variable.cookieName);
+                                            enqueueSnackbar('Cookie name copied to clipboard', { variant: 'success' });
+                                          }}
+                                        >
+                                          <ContentCopyIcon fontSize="small" />
+                                        </IconButton>
+                                      </Box>
+                                    </TableCell>
+                                    <TableCell>
+                                      <Button
+                                        size="small"
+                                        variant="outlined"
+                                        onClick={() => handleStoreCookieVariable(variable)}
+                                      >
+                                        Store Variable
+                                      </Button>
+                                    </TableCell>
+                                  </TableRow>
+                                ))}
+                              </TableBody>
+                            </Table>
+                          </TableContainer>
+                        </Grid>
+                      )}
+
+                      {/* Stored Variables Section */}
+                      <Grid item xs={12}>
+                        <Typography variant="subtitle1" gutterBottom>
+                          Stored Variables
+                        </Typography>
+                        
+                        {/* Stored Response Variables */}
+                        {storedResponseVariables.length > 0 && (
+                          <Box sx={{ mb: 2 }}>
+                            <Typography variant="subtitle2" gutterBottom>
+                              Stored Response Variables
+                            </Typography>
+                            <TableContainer component={Paper} variant="outlined">
+                              <Table size="small">
+                                <TableHead>
+                                  <TableRow>
+                                    <TableCell>Name</TableCell>
+                                    <TableCell>Value</TableCell>
+                                    <TableCell>Actions</TableCell>
+                                  </TableRow>
+                                </TableHead>
+                                <TableBody>
+                                  {storedResponseVariables.map((variable, index) => (
+                                    <TableRow key={index}>
+                                      <TableCell>{variable.name}</TableCell>
+                                      <TableCell>
+                                        <Box sx={{ display: 'flex', alignItems: 'center' }}>
+                                          <Typography sx={{ fontFamily: 'monospace' }}>
+                                            {variable.value}
+                                          </Typography>
+                                          <IconButton
+                                            size="small"
+                                            onClick={() => {
+                                              navigator.clipboard.writeText(variable.value);
+                                              enqueueSnackbar('Value copied to clipboard', { variant: 'success' });
+                                            }}
+                                          >
+                                            <ContentCopyIcon fontSize="small" />
+                                          </IconButton>
+                                        </Box>
+                                      </TableCell>
+                                      <TableCell>
+                                        <IconButton
+                                          size="small"
+                                          onClick={() => handleRemoveStoredVariable('response', index)}
+                                        >
+                                          <DeleteIcon fontSize="small" />
+                                        </IconButton>
+                                      </TableCell>
+                                    </TableRow>
+                                  ))}
+                                </TableBody>
+                              </Table>
+                            </TableContainer>
+                          </Box>
+                        )}
+
+                        {/* Stored Cookie Variables */}
+                        {storedCookieVariables.length > 0 && (
+                          <Box>
+                            <Typography variant="subtitle2" gutterBottom>
+                              Stored Cookie Variables
+                            </Typography>
+                            <TableContainer component={Paper} variant="outlined">
+                              <Table size="small">
+                                <TableHead>
+                                  <TableRow>
+                                    <TableCell>Name</TableCell>
+                                    <TableCell>Cookie Name</TableCell>
+                                    <TableCell>Actions</TableCell>
+                                  </TableRow>
+                                </TableHead>
+                                <TableBody>
+                                  {storedCookieVariables.map((variable, index) => (
+                                    <TableRow key={index}>
+                                      <TableCell>{variable.name}</TableCell>
+                                      <TableCell>
+                                        <Box sx={{ display: 'flex', alignItems: 'center' }}>
+                                          <Typography sx={{ fontFamily: 'monospace' }}>
+                                            {variable.cookieName}
+                                          </Typography>
+                                          <IconButton
+                                            size="small"
+                                            onClick={() => {
+                                              navigator.clipboard.writeText(variable.cookieName);
+                                              enqueueSnackbar('Cookie name copied to clipboard', { variant: 'success' });
+                                            }}
+                                          >
+                                            <ContentCopyIcon fontSize="small" />
+                                          </IconButton>
+                                        </Box>
+                                      </TableCell>
+                                      <TableCell>
+                                        <IconButton
+                                          size="small"
+                                          onClick={() => handleRemoveStoredVariable('cookie', index)}
+                                        >
+                                          <DeleteIcon fontSize="small" />
+                                        </IconButton>
+                                      </TableCell>
+                                    </TableRow>
+                                  ))}
+                                </TableBody>
+                              </Table>
+                            </TableContainer>
+                          </Box>
+                        )}
+                      </Grid>
+                    </>
+                  )}
+                </Grid>
+              </CardContent>
+            </Card>
+          </Grid>
+
+          {/* Right Column - Environment and API Requests */}
+          <Grid item xs={12} md={6}>
+            <Card sx={{ mb: 3 }}>
+              <CardContent>
+                <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
+                  <Typography variant="h6" sx={{ color: 'primary.main', fontWeight: 'bold' }}>
+                    Environment Configuration
+                  </Typography>
+                  <Button
+                    variant="contained"
+                    size="small"
+                    startIcon={<AddIcon />}
+                    onClick={handleEnvironmentDialogOpen}
+                  >
+                    Add Environment
+                  </Button>
+                </Box>
+
+                <Grid container spacing={2}>
+                  <Grid item xs={12}>
+                    <FormControl fullWidth size="small">
+                      <InputLabel>Select Environment</InputLabel>
+                      <Select
+                        value={selectedEnvironment}
+                        label="Select Environment"
+                        onChange={handleEnvironmentChange}
+                      >
+                        {environments.map((env) => (
+                          <MenuItem key={env.name} value={env.name}>
+                            {env.name}
+                          </MenuItem>
+                        ))}
+                      </Select>
+                    </FormControl>
+                  </Grid>
+
+                  {selectedEnvironment && (
+                    <Grid item xs={12}>
+                      <TableContainer component={Paper} variant="outlined">
+                        <Table size="small">
+                          <TableHead>
+                            <TableRow>
+                              <TableCell>Environment</TableCell>
+                              <TableCell>Base URL</TableCell>
+                              <TableCell>Actions</TableCell>
+                            </TableRow>
+                          </TableHead>
+                          <TableBody>
+                            {environments
+                              .filter(env => env.name === selectedEnvironment)
+                              .map((env) => (
+                                <TableRow key={env.name}>
+                                  <TableCell>{env.name}</TableCell>
+                                  <TableCell>{env.baseUrl}</TableCell>
+                                  <TableCell>
+                                    <IconButton size="small" onClick={() => handleEnvironmentEdit(env)}>
+                                      <EditIcon fontSize="small" />
+                                    </IconButton>
+                                    <IconButton size="small" onClick={() => handleEnvironmentDelete(env.name)}>
+                                      <DeleteIcon fontSize="small" />
+                                    </IconButton>
                                   </TableCell>
-                                  <TableCell>{cookie.domain}</TableCell>
-                                  <TableCell>{cookie.path}</TableCell>
-                                  <TableCell>{cookie.expires || '-'}</TableCell>
-                                  <TableCell>{cookie.secure ? 'Yes' : 'No'}</TableCell>
-                                  <TableCell>{cookie.httpOnly ? 'Yes' : 'No'}</TableCell>
                                 </TableRow>
                               ))}
-                            </TableBody>
-                          </Table>
-                        </TableContainer>
-                      </AccordionDetails>
-                    </Accordion>
-                  </Grid>
-                ))}
-              </Grid>
-            </CardContent>
-          </Card>
-        )}
+                          </TableBody>
+                        </Table>
+                      </TableContainer>
+                    </Grid>
+                  )}
+                </Grid>
+              </CardContent>
+            </Card>
+          </Grid>
+        </Grid>
 
-        <Box sx={{ display: 'flex', justifyContent: 'flex-end' }}>
+        <Box sx={{ display: 'flex', justifyContent: 'flex-end', mt: 3 }}>
           <LoadingButton
             type="submit"
             variant="contained"
@@ -961,237 +1207,104 @@ function ConfigurationPanel() {
             Save Configuration
           </LoadingButton>
         </Box>
-      </Box>
 
-      <Dialog open={isApiDialogOpen} onClose={handleApiDialogClose} maxWidth="md" fullWidth>
-        <DialogTitle>{isEditing ? 'Edit' : 'Add'} API Request</DialogTitle>
-        <DialogContent>
-          <Grid container spacing={2} sx={{ mt: 1 }}>
-            <Grid item xs={12}>
-              <TextField
-                fullWidth
-                required
-                label="Request Name"
-                value={currentApiRequest.name}
-                onChange={(e) => setCurrentApiRequest({ ...currentApiRequest, name: e.target.value })}
-              />
-            </Grid>
-            <Grid item xs={12} sm={6}>
-              <FormControl fullWidth required>
-                <InputLabel>Method</InputLabel>
-                <Select
-                  value={currentApiRequest.method}
-                  label="Method"
-                  onChange={(e) => setCurrentApiRequest({ ...currentApiRequest, method: e.target.value })}
-                >
-                  <MenuItem value="GET">GET</MenuItem>
-                  <MenuItem value="POST">POST</MenuItem>
-                  <MenuItem value="PUT">PUT</MenuItem>
-                  <MenuItem value="DELETE">DELETE</MenuItem>
-                </Select>
-              </FormControl>
-            </Grid>
-            <Grid item xs={12} sm={6}>
-              <FormControl fullWidth required>
-                <InputLabel>Test Suite</InputLabel>
-                <Select
-                  value={currentApiRequest.suite}
-                  label="Test Suite"
-                  onChange={(e) => setCurrentApiRequest({ ...currentApiRequest, suite: e.target.value })}
-                >
-                  <MenuItem value={TEST_SUITES.SMOKE}>Smoke Tests</MenuItem>
-                  <MenuItem value={TEST_SUITES.REGRESSION}>Regression Tests</MenuItem>
-                  <MenuItem value={TEST_SUITES.SANITY}>Sanity Tests</MenuItem>
-                  <MenuItem value={TEST_SUITES.PERFORMANCE}>Performance Tests</MenuItem>
-                </Select>
-              </FormControl>
-            </Grid>
-            <Grid item xs={12} sm={6}>
-              <TextField
-                fullWidth
-                required
-                label="Expected Status"
-                type="number"
-                value={currentApiRequest.expectedStatus}
-                onChange={(e) => setCurrentApiRequest({ ...currentApiRequest, expectedStatus: parseInt(e.target.value) })}
-              />
-            </Grid>
-            <Grid item xs={12}>
-              <TextField
-                fullWidth
-                required
-                label="Endpoint"
-                value={currentApiRequest.endpoint}
-                onChange={(e) => setCurrentApiRequest({ ...currentApiRequest, endpoint: e.target.value })}
-              />
-            </Grid>
-            <Grid item xs={12}>
-              <TextField
-                fullWidth
-                label="Headers"
-                multiline
-                rows={3}
-                value={currentApiRequest.headers}
-                onChange={(e) => setCurrentApiRequest({ ...currentApiRequest, headers: e.target.value })}
-                helperText="Enter headers in JSON format"
-              />
-            </Grid>
-            <Grid item xs={12}>
-              <TextField
-                fullWidth
-                label="Request Body"
-                multiline
-                rows={3}
-                value={currentApiRequest.body}
-                onChange={(e) => setCurrentApiRequest({ ...currentApiRequest, body: e.target.value })}
-                helperText="Enter request body in JSON format"
-              />
-            </Grid>
-            <Grid item xs={12}>
-              <Typography variant="h6" gutterBottom>
-                Assertions
-              </Typography>
-              <Box sx={{ mb: 2 }}>
-                {currentApiRequest.assertions?.map((assertion, index) => (
-                  <Box key={index} sx={{ display: 'flex', gap: 2, mb: 2 }}>
-                    <TextField
-                      fullWidth
-                      label="Field Path"
-                      value={assertion.field}
-                      onChange={(e) => {
-                        const newAssertions = [...(currentApiRequest.assertions || [])];
-                        newAssertions[index].field = e.target.value;
-                        setCurrentApiRequest({ ...currentApiRequest, assertions: newAssertions });
-                      }}
-                      placeholder="e.g., data.user.id"
-                    />
-                    <FormControl sx={{ minWidth: 120 }}>
-                      <InputLabel>Validation Type</InputLabel>
-                      <Select
-                        value={assertion.validationType || 'value'}
-                        label="Validation Type"
-                        onChange={(e) => {
-                          const newAssertions = [...(currentApiRequest.assertions || [])];
-                          newAssertions[index].validationType = e.target.value as 'value' | 'schema';
-                          setCurrentApiRequest({ ...currentApiRequest, assertions: newAssertions });
-                        }}
-                      >
-                        <MenuItem value="value">Value</MenuItem>
-                        <MenuItem value="schema">Schema</MenuItem>
-                      </Select>
-                    </FormControl>
-                    {assertion.validationType === 'value' ? (
-                      <>
-                        <FormControl sx={{ minWidth: 120 }}>
-                          <InputLabel>Operator</InputLabel>
-                          <Select
-                            value={assertion.operator}
-                            label="Operator"
-                            onChange={(e) => {
-                              const newAssertions = [...(currentApiRequest.assertions || [])];
-                              newAssertions[index].operator = e.target.value;
-                              setCurrentApiRequest({ ...currentApiRequest, assertions: newAssertions });
-                            }}
-                          >
-                            <MenuItem value="equals">Equals</MenuItem>
-                            <MenuItem value="notEquals">Not Equals</MenuItem>
-                            <MenuItem value="contains">Contains</MenuItem>
-                            <MenuItem value="notContains">Not Contains</MenuItem>
-                            <MenuItem value="greaterThan">Greater Than</MenuItem>
-                            <MenuItem value="lessThan">Less Than</MenuItem>
-                            <MenuItem value="exists">Exists</MenuItem>
-                            <MenuItem value="notExists">Not Exists</MenuItem>
-                          </Select>
-                        </FormControl>
-                        <TextField
-                          fullWidth
-                          label="Expected Value"
-                          value={assertion.value}
-                          onChange={(e) => {
-                            const newAssertions = [...(currentApiRequest.assertions || [])];
-                            newAssertions[index].value = e.target.value;
-                            setCurrentApiRequest({ ...currentApiRequest, assertions: newAssertions });
-                          }}
-                          placeholder="Expected value"
-                        />
-                      </>
-                    ) : (
+        <Dialog open={isEnvironmentDialogOpen} onClose={handleEnvironmentDialogClose} maxWidth="md" fullWidth>
+          <DialogTitle>{currentEnvironment.name ? 'Edit' : 'Add'} Environment</DialogTitle>
+          <DialogContent>
+            <Grid container spacing={2} sx={{ mt: 1 }}>
+              <Grid item xs={12}>
+                <TextField
+                  fullWidth
+                  required
+                  label="Environment Name"
+                  value={currentEnvironment.name}
+                  onChange={(e) => setCurrentEnvironment({ ...currentEnvironment, name: e.target.value })}
+                />
+              </Grid>
+              <Grid item xs={12}>
+                <TextField
+                  fullWidth
+                  required
+                  label="Base URL"
+                  value={currentEnvironment.baseUrl}
+                  onChange={(e) => setCurrentEnvironment({ ...currentEnvironment, baseUrl: e.target.value })}
+                />
+              </Grid>
+              <Grid item xs={12}>
+                <Typography variant="subtitle1" gutterBottom>
+                  Environment Parameters
+                </Typography>
+                {Object.entries(currentEnvironment.parameters).map(([key, value], index) => (
+                  <Grid container spacing={2} key={index} sx={{ mb: 2 }}>
+                    <Grid item xs={5}>
                       <TextField
                         fullWidth
-                        label="JSON Schema"
-                        multiline
-                        rows={4}
-                        value={assertion.schema || ''}
+                        label="Parameter Name"
+                        value={key}
                         onChange={(e) => {
-                          const newAssertions = [...(currentApiRequest.assertions || [])];
-                          newAssertions[index].schema = e.target.value;
-                          setCurrentApiRequest({ ...currentApiRequest, assertions: newAssertions });
+                          const newParameters = { ...currentEnvironment.parameters };
+                          const newKey = e.target.value;
+                          if (newKey !== key) {
+                            delete newParameters[key];
+                            newParameters[newKey] = value;
+                            setCurrentEnvironment(prev => ({
+                              ...prev,
+                              parameters: newParameters
+                            }));
+                          }
                         }}
-                        placeholder="Enter JSON Schema for validation"
-                        helperText="Enter a valid JSON Schema to validate the field"
                       />
-                    )}
-                    <FormControl sx={{ minWidth: 120 }}>
-                      <InputLabel>Type</InputLabel>
-                      <Select
-                        value={assertion.type}
-                        label="Type"
+                    </Grid>
+                    <Grid item xs={5}>
+                      <TextField
+                        fullWidth
+                        label="Parameter Value"
+                        value={value}
                         onChange={(e) => {
-                          const newAssertions = [...(currentApiRequest.assertions || [])];
-                          newAssertions[index].type = e.target.value;
-                          setCurrentApiRequest({ ...currentApiRequest, assertions: newAssertions });
+                          const newParameters = { ...currentEnvironment.parameters };
+                          newParameters[key] = e.target.value;
+                          setCurrentEnvironment(prev => ({
+                            ...prev,
+                            parameters: newParameters
+                          }));
+                        }}
+                      />
+                    </Grid>
+                    <Grid item xs={2}>
+                      <IconButton
+                        onClick={() => {
+                          const newParameters = { ...currentEnvironment.parameters };
+                          delete newParameters[key];
+                          setCurrentEnvironment(prev => ({
+                            ...prev,
+                            parameters: newParameters
+                          }));
                         }}
                       >
-                        <MenuItem value="string">String</MenuItem>
-                        <MenuItem value="number">Number</MenuItem>
-                        <MenuItem value="boolean">Boolean</MenuItem>
-                        <MenuItem value="array">Array</MenuItem>
-                        <MenuItem value="object">Object</MenuItem>
-                      </Select>
-                    </FormControl>
-                    <IconButton
-                      color="error"
-                      onClick={() => {
-                        const newAssertions = (currentApiRequest.assertions || []).filter((_, i) => i !== index);
-                        setCurrentApiRequest({ ...currentApiRequest, assertions: newAssertions });
-                      }}
-                    >
-                      <DeleteIcon />
-                    </IconButton>
-                  </Box>
+                        <DeleteIcon />
+                      </IconButton>
+                    </Grid>
+                  </Grid>
                 ))}
                 <Button
-                  variant="outlined"
-                  startIcon={<AddCircleOutlineIcon />}
+                  startIcon={<AddIcon />}
                   onClick={() => {
-                    setCurrentApiRequest({
-                      ...currentApiRequest,
-                      assertions: [
-                        ...(currentApiRequest.assertions || []),
-                        { 
-                          field: '', 
-                          operator: 'equals', 
-                          value: '', 
-                          type: 'string',
-                          validationType: 'value'
-                        }
-                      ]
-                    });
+                    const newParameters = { ...currentEnvironment.parameters };
+                    newParameters[`param${Object.keys(newParameters).length + 1}`] = '';
+                    setCurrentEnvironment({ ...currentEnvironment, parameters: newParameters });
                   }}
                 >
-                  Add Assertion
+                  Add Parameter
                 </Button>
-              </Box>
+              </Grid>
             </Grid>
-          </Grid>
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={handleApiDialogClose}>Cancel</Button>
-          <Button onClick={handleApiRequestSave} variant="contained" color="primary">
-            Save Request
-          </Button>
-        </DialogActions>
-      </Dialog>
+          </DialogContent>
+          <DialogActions>
+            <Button onClick={handleEnvironmentDialogClose}>Cancel</Button>
+            <Button onClick={handleEnvironmentSave} variant="contained">Save</Button>
+          </DialogActions>
+        </Dialog>
+      </Box>
     </motion.div>
   );
 }

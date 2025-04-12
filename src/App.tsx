@@ -8,15 +8,18 @@ import {
   Typography,
   Paper,
   useTheme,
+  Toolbar,
 } from '@mui/material';
 import { motion } from 'framer-motion';
 import { SnackbarProvider } from 'notistack';
 import SettingsIcon from '@mui/icons-material/Settings';
 import PlayArrowIcon from '@mui/icons-material/PlayArrow';
 import AssessmentIcon from '@mui/icons-material/Assessment';
+import BarChartIcon from '@mui/icons-material/BarChart';
 import ConfigurationPanel from './components/ConfigurationPanel';
 import ExecutionPanel from './components/ExecutionPanel';
 import ResultsPanel from './components/ResultsPanel';
+import ApiRequestsPanel from './components/ApiRequestsPanel';
 
 interface TabPanelProps {
   children?: React.ReactNode;
@@ -74,17 +77,19 @@ function App() {
           }}
         >
           <Container>
-            <Typography 
-              variant="h4" 
-              component="div" 
-              sx={{ 
-                p: 2, 
-                fontWeight: 'bold',
-                textShadow: '2px 2px 4px rgba(0,0,0,0.2)'
-              }}
-            >
-              Test Automation Dashboard
-            </Typography>
+            <Toolbar>
+              <Typography 
+                variant="h4" 
+                component="div" 
+                sx={{ 
+                  p: 2, 
+                  fontWeight: 'bold',
+                  textShadow: '2px 2px 4px rgba(0,0,0,0.2)'
+                }}
+              >
+                Test Automation Dashboard
+              </Typography>
+            </Toolbar>
             <Tabs 
               value={currentTab} 
               onChange={handleTabChange}
@@ -100,8 +105,9 @@ function App() {
               }}
             >
               <Tab icon={<SettingsIcon />} label="Configuration" />
-              <Tab icon={<PlayArrowIcon />} label="Execution" />
-              <Tab icon={<AssessmentIcon />} label="Results" />
+              <Tab icon={<PlayArrowIcon />} label="API Requests" />
+              <Tab icon={<AssessmentIcon />} label="Execution" />
+              <Tab icon={<BarChartIcon />} label="Reports" />
             </Tabs>
           </Container>
         </AppBar>
@@ -119,9 +125,12 @@ function App() {
               <ConfigurationPanel />
             </TabPanel>
             <TabPanel value={currentTab} index={1}>
-              <ExecutionPanel />
+              <ApiRequestsPanel />
             </TabPanel>
             <TabPanel value={currentTab} index={2}>
+              <ExecutionPanel />
+            </TabPanel>
+            <TabPanel value={currentTab} index={3}>
               <ResultsPanel />
             </TabPanel>
           </Paper>
