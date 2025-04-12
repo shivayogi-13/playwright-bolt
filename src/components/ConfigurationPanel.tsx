@@ -124,6 +124,32 @@ interface MFARequest {
   cookieVariables: Array<{ name: string; cookieName: string }>;
 }
 
+interface ApiRequest {
+  id: string;
+  name: string;
+  method: string;
+  endpoint: string;
+  headers: { key: string; value: string }[];
+  body: string;
+  expectedStatus: number;
+  suite: string;
+  environment: string;
+  assertions: Assertion[];
+  responseVariable?: string;
+  cookieVariable?: string;
+}
+
+interface Assertion {
+  id: string;
+  type: 'status' | 'body' | 'header';
+  path: string;
+  operator: string;
+  value: string;
+  validationType?: string;
+  schema?: string;
+  keyValuePairs: { key: string; value: string }[];
+}
+
 const STORAGE_KEYS = {
   CONFIG: 'test_automation_config',
   TEST_STATUS: 'test_automation_status',
@@ -174,21 +200,16 @@ function ConfigurationPanel() {
   const [remainingTime, setRemainingTime] = useState<number>(30);
   const [mfaSecretError, setMfaSecretError] = useState<string>('');
   const [environments, setEnvironments] = useState<Environment[]>([]);
-  const [selectedEnvironment, setSelectedEnvironment] = useState<string>('');
+  const [currentEnvironment, setCurrentEnvironment] = useState<Environment>({ name: '', baseUrl: '', parameters: {} });
   const [isEnvironmentDialogOpen, setIsEnvironmentDialogOpen] = useState(false);
-  const [currentEnvironment, setCurrentEnvironment] = useState<Environment>({
-    name: '',
-    baseUrl: '',
-    parameters: {}
-  });
+  const [selectedEnvironment, setSelectedEnvironment] = useState<string>('');
   const [expandedSections, setExpandedSections] = useState<ExpandedSections>({
     basic: true,
-    mfa: true,
-    api: true,
-    cookies: true,
-    environment: true,
+    mfa: false,
+    api: false,
+    cookies: false,
+    environment: false
   });
-  const [editingParamKey, setEditingParamKey] = useState<string | null>(null);
   const [mfaConfig, setMfaConfig] = useState<MFAConfig>({
     enabled: false,
     secretKey: '',
@@ -208,8 +229,13 @@ function ConfigurationPanel() {
     responseVariables: [],
     cookieVariables: []
   });
-  const [storedResponseVariables, setStoredResponseVariables] = useState<Array<{ name: string; value: string }>>([]);
-  const [storedCookieVariables, setStoredCookieVariables] = useState<Array<{ name: string; cookieName: string }>>([]);
+  const [storedVariables, setStoredVariables] = useState<{
+    response: Array<{ name: string; value: string }>;
+    cookie: Array<{ name: string; cookieName: string }>;
+  }>({
+    response: [],
+    cookie: []
+  });
 
   const { control, handleSubmit, watch, reset } = useForm<ConfigFormData>({
     defaultValues: {
@@ -415,10 +441,16 @@ function ConfigurationPanel() {
       const savedCookieVars = localStorage.getItem('stored_cookie_variables');
       
       if (savedResponseVars) {
-        setStoredResponseVariables(JSON.parse(savedResponseVars));
+        setStoredVariables(prev => ({
+          ...prev,
+          response: JSON.parse(savedResponseVars)
+        }));
       }
       if (savedCookieVars) {
-        setStoredCookieVariables(JSON.parse(savedCookieVars));
+        setStoredVariables(prev => ({
+          ...prev,
+          cookie: JSON.parse(savedCookieVars)
+        }));
       }
     };
 
@@ -589,14 +621,20 @@ function ConfigurationPanel() {
   // Add this function to remove stored variables
   const handleRemoveStoredVariable = (type: 'response' | 'cookie', index: number) => {
     if (type === 'response') {
-      const updatedVars = [...storedResponseVariables];
+      const updatedVars = [...storedVariables.response];
       updatedVars.splice(index, 1);
-      setStoredResponseVariables(updatedVars);
+      setStoredVariables(prev => ({
+        ...prev,
+        response: updatedVars
+      }));
       localStorage.setItem('stored_response_variables', JSON.stringify(updatedVars));
     } else {
-      const updatedVars = [...storedCookieVariables];
+      const updatedVars = [...storedVariables.cookie];
       updatedVars.splice(index, 1);
-      setStoredCookieVariables(updatedVars);
+      setStoredVariables(prev => ({
+        ...prev,
+        cookie: updatedVars
+      }));
       localStorage.setItem('stored_cookie_variables', JSON.stringify(updatedVars));
     }
     enqueueSnackbar('Variable removed successfully', { variant: 'success' });
@@ -1001,7 +1039,7 @@ function ConfigurationPanel() {
                         </Typography>
                         
                         {/* Stored Response Variables */}
-                        {storedResponseVariables.length > 0 && (
+                        {storedVariables.response.length > 0 && (
                           <Box sx={{ mb: 2 }}>
                             <Typography variant="subtitle2" gutterBottom>
                               Stored Response Variables
@@ -1016,7 +1054,7 @@ function ConfigurationPanel() {
                                   </TableRow>
                                 </TableHead>
                                 <TableBody>
-                                  {storedResponseVariables.map((variable, index) => (
+                                  {storedVariables.response.map((variable, index) => (
                                     <TableRow key={index}>
                                       <TableCell>{variable.name}</TableCell>
                                       <TableCell>
@@ -1052,7 +1090,7 @@ function ConfigurationPanel() {
                         )}
 
                         {/* Stored Cookie Variables */}
-                        {storedCookieVariables.length > 0 && (
+                        {storedVariables.cookie.length > 0 && (
                           <Box>
                             <Typography variant="subtitle2" gutterBottom>
                               Stored Cookie Variables
@@ -1067,7 +1105,7 @@ function ConfigurationPanel() {
                                   </TableRow>
                                 </TableHead>
                                 <TableBody>
-                                  {storedCookieVariables.map((variable, index) => (
+                                  {storedVariables.cookie.map((variable, index) => (
                                     <TableRow key={index}>
                                       <TableCell>{variable.name}</TableCell>
                                       <TableCell>

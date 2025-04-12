@@ -493,65 +493,108 @@ function ExecutionPanel() {
     }
   };
 
+  const getNestedValue = (obj: any, path: string) => {
+    if (!path || !obj) return undefined;
+    try {
+      return path.split('.').reduce((o, i) => {
+        if (o === undefined || o === null) return undefined;
+        return o[i];
+      }, obj);
+    } catch (error) {
+      console.error('Error getting value by path:', error);
+      return undefined;
+    }
+  };
+
+  const compareValues = (actual: any, expected: any, operator: string) => {
+    if (actual === undefined || actual === null) {
+      return operator === 'exists' ? false : false;
+    }
+
+    try {
+      switch (operator) {
+        case 'equals':
+          return String(actual) === String(expected);
+        case 'contains':
+          return String(actual).includes(String(expected));
+        case 'matches':
+          return new RegExp(String(expected)).test(String(actual));
+        case 'exists':
+          return actual !== undefined && actual !== null;
+        case 'notEquals':
+          return String(actual) !== String(expected);
+        case 'notContains':
+          return !String(actual).includes(String(expected));
+        case 'greaterThan':
+          return Number(actual) > Number(expected);
+        case 'lessThan':
+          return Number(actual) < Number(expected);
+        case 'notExists':
+          return actual === undefined || actual === null;
+        default:
+          return false;
+      }
+    } catch (error) {
+      console.error('Error comparing values:', error);
+      return false;
+    }
+  };
+
   const validateAssertions = async (response: any, assertions: Assertion[]): Promise<TestStatus['assertionResults']> => {
     const results = await Promise.all(assertions.map(async assertion => {
       try {
-        const fieldValue = getNestedValue(response, assertion.field);
+        let fieldValue;
         let passed = false;
         let message = '';
 
-        if (assertion.validationType === 'schema') {
-          try {
-            const schema = JSON.parse(assertion.schema || '{}');
-            const validate = ajv.compile(schema);
-            const validationResult = await validate(fieldValue);
-            passed = validationResult;
-            message = passed 
-              ? `Schema validation passed for ${assertion.field}`
-              : `Schema validation failed for ${assertion.field}: ${ajv.errorsText(validate.errors)}`;
-          } catch (error) {
-            passed = false;
-            message = `Invalid JSON Schema: ${error instanceof Error ? error.message : String(error)}`;
-          }
-        } else {
-          switch (assertion.operator) {
-            case 'equals':
-              passed = String(fieldValue) === assertion.value;
-              message = `Expected ${assertion.field} to equal ${assertion.value}, got ${fieldValue}`;
-              break;
-            case 'notEquals':
-              passed = String(fieldValue) !== assertion.value;
-              message = `Expected ${assertion.field} to not equal ${assertion.value}, got ${fieldValue}`;
-              break;
-            case 'contains':
-              passed = String(fieldValue).includes(assertion.value);
-              message = `Expected ${assertion.field} to contain ${assertion.value}, got ${fieldValue}`;
-              break;
-            case 'notContains':
-              passed = !String(fieldValue).includes(assertion.value);
-              message = `Expected ${assertion.field} to not contain ${assertion.value}, got ${fieldValue}`;
-              break;
-            case 'greaterThan':
-              passed = Number(fieldValue) > Number(assertion.value);
-              message = `Expected ${assertion.field} to be greater than ${assertion.value}, got ${fieldValue}`;
-              break;
-            case 'lessThan':
-              passed = Number(fieldValue) < Number(assertion.value);
-              message = `Expected ${assertion.field} to be less than ${assertion.value}, got ${fieldValue}`;
-              break;
-            case 'exists':
-              passed = fieldValue !== undefined && fieldValue !== null;
-              message = `Expected ${assertion.field} to exist, got ${fieldValue}`;
-              break;
-            case 'notExists':
-              passed = fieldValue === undefined || fieldValue === null;
-              message = `Expected ${assertion.field} to not exist, got ${fieldValue}`;
-              break;
-          }
+        switch (assertion.type) {
+          case 'status':
+            fieldValue = response.status;
+            passed = compareValues(fieldValue, assertion.value, assertion.operator);
+            message = `Status Code ${fieldValue} ${passed ? 'matches' : 'does not match'} expected ${assertion.value}`;
+            break;
+
+          case 'body':
+            if (assertion.validationType === 'schema') {
+              try {
+                const schema = JSON.parse(assertion.schema || '{}');
+                const validate = ajv.compile(schema);
+                const validationResult = await validate(response);
+                passed = validationResult;
+                message = passed 
+                  ? `Schema validation passed for ${assertion.path}`
+                  : `Schema validation failed for ${assertion.path}: ${ajv.errorsText(validate.errors)}`;
+              } catch (error) {
+                passed = false;
+                message = `Invalid JSON Schema: ${error instanceof Error ? error.message : String(error)}`;
+              }
+            } else {
+              fieldValue = getNestedValue(response, assertion.path);
+              passed = compareValues(fieldValue, assertion.value, assertion.operator);
+              message = `Value at path "${assertion.path}" ${passed ? 'matches' : 'does not match'} expected value`;
+              if (!passed) {
+                message += `\nExpected: ${assertion.value}\nActual: ${fieldValue === undefined ? 'undefined' : JSON.stringify(fieldValue)}`;
+              }
+            }
+            break;
+
+          case 'header':
+            try {
+              fieldValue = response.headers.get(assertion.path);
+              passed = compareValues(fieldValue, assertion.value, assertion.operator);
+              message = `Header "${assertion.path}" ${passed ? 'matches' : 'does not match'} expected value`;
+              if (!passed) {
+                message += `\nExpected: ${assertion.value}\nActual: ${fieldValue === null ? 'null' : fieldValue}`;
+              }
+            } catch (error) {
+              passed = false;
+              message = `Error validating header: ${error instanceof Error ? error.message : 'Unknown error'}`;
+            }
+            break;
         }
 
         return {
-          field: assertion.field,
+          field: assertion.path || assertion.type,
           expected: assertion.validationType === 'schema' ? 'Schema Validation' : assertion.value,
           actual: fieldValue,
           passed,
@@ -559,7 +602,7 @@ function ExecutionPanel() {
         };
       } catch (error) {
         return {
-          field: assertion.field,
+          field: assertion.path || assertion.type,
           expected: assertion.validationType === 'schema' ? 'Schema Validation' : assertion.value,
           actual: 'Error',
           passed: false,
@@ -569,13 +612,6 @@ function ExecutionPanel() {
     }));
 
     return results;
-  };
-
-  const getNestedValue = (obj: any, path: string): any => {
-    return path.split('.').reduce((current, key) => {
-      if (current === undefined || current === null) return undefined;
-      return current[key];
-    }, obj);
   };
 
   const startTests = async () => {
@@ -1101,61 +1137,158 @@ function ExecutionPanel() {
 
       // Make the API request
       const startTime = Date.now();
-      console.log('Making request to:', finalUrl); // Debug log
+      console.log('Making request to:', finalUrl);
+      
       const response = await fetch(finalUrl, {
         method: request.method,
         headers: headers,
-        body: request.method !== 'GET' ? JSON.stringify(body) : undefined,
+        body: request.method !== 'GET' ? JSON.stringify(body) : undefined
       });
 
+      const responseTime = Date.now() - startTime;
       const responseData = await response.json();
-      const duration = Date.now() - startTime;
 
-      // Extract and store variables from response
-      const newVariables = extractVariablesFromResponse(test.name, responseData);
-      
-      // Update test variables
-      setTestVariables(prev => {
-        const existingTestIndex = prev.findIndex(tv => tv.testName === test.name);
-        if (existingTestIndex >= 0) {
-          const updated = [...prev];
-          updated[existingTestIndex] = {
-            testName: test.name,
-            variables: newVariables
-          };
-          return updated;
-        }
-        return [...prev, { testName: test.name, variables: newVariables }];
-      });
-
-      // Validate assertions if they exist
-      const assertionResults = test.assertions ? await validateAssertions(responseData, test.assertions) : undefined;
-      const allAssertionsPassed = assertionResults ? assertionResults.every(a => a.passed) : true;
-
-      const testStatus = response.status === test.expectedStatus && allAssertionsPassed ? 'passed' : 'failed';
-      
-      // Create formatted logs
-      const formattedLogs = [
+      // Log the request and response details
+      const logEntry = [
         `Test: ${test.name}`,
-        `Status: ${testStatus.toUpperCase()}`,
-        `Duration: ${duration}ms`,
-        `Request Details:`,
-        `  Method: ${request.method}`,
-        `  Base URL: ${baseUrl}`,
-        `  Endpoint: ${endpoint}`,
-        `  Full URL: ${finalUrl}`,
-        `  Headers: ${JSON.stringify(headers, null, 2)}`,
-        `  Body: ${request.body || 'None'}`,
-        `Response Details:`,
-        `  Status: ${response.status}`,
-        `  Expected Status: ${test.expectedStatus}`,
-        `  Body: ${JSON.stringify(responseData, null, 2)}`,
+        `Status: ${response.status === request.expectedStatus ? 'PASSED' : 'FAILED'}`,
+        '',
+        'Request Details:',
+        `Method: ${request.method}`,
+        `Endpoint: ${finalUrl}`,
+        `Headers: ${JSON.stringify(headers, null, 2)}`,
+        `Body: ${request.method !== 'GET' ? JSON.stringify(body, null, 2) : 'None'}`,
+        '',
+        'Response Details:',
+        `Status Code: ${response.status}`,
+        `Response Time: ${responseTime}ms`,
+        `Response Body: ${JSON.stringify(responseData, null, 2)}`,
+        '',
+        'Assertion Results:'
       ];
 
-      // ... rest of the existing executeTest code ...
+      // Validate assertions
+      let allAssertionsPassed = true;
+      for (const assertion of request.assertions) {
+        let assertionResult = '';
+        let assertionPassed = false;
+
+        try {
+          switch (assertion.type) {
+            case 'status':
+              assertionPassed = response.status === parseInt(assertion.value);
+              assertionResult = `Status Code ${response.status} ${assertionPassed ? 'matches' : 'does not match'} expected ${assertion.value}`;
+              break;
+
+            case 'body':
+              if (assertion.validationType === 'schema') {
+                try {
+                  // Schema validation
+                  const schema = JSON.parse(assertion.schema || '{}');
+                  const validate = ajv.compile(schema);
+                  assertionPassed = validate(responseData);
+                  assertionResult = `Schema validation ${assertionPassed ? 'passed' : 'failed'}: ${JSON.stringify(validate.errors)}`;
+                } catch (error) {
+                  assertionPassed = false;
+                  assertionResult = `Schema validation failed: ${error instanceof Error ? error.message : 'Invalid schema'}`;
+                }
+              } else {
+                // Value validation
+                const value = getValueByPath(responseData, assertion.path);
+                assertionPassed = compareValues(value, assertion.value, assertion.operator);
+                assertionResult = `Value at path "${assertion.path}" ${assertionPassed ? 'matches' : 'does not match'} expected value`;
+                if (!assertionPassed) {
+                  assertionResult += `\nExpected: ${assertion.value}\nActual: ${value === undefined ? 'undefined' : JSON.stringify(value)}`;
+                }
+              }
+              break;
+
+            case 'header':
+              try {
+                const headerValue = response.headers.get(assertion.path);
+                assertionPassed = compareValues(headerValue, assertion.value, assertion.operator);
+                assertionResult = `Header "${assertion.path}" ${assertionPassed ? 'matches' : 'does not match'} expected value`;
+                if (!assertionPassed) {
+                  assertionResult += `\nExpected: ${assertion.value}\nActual: ${headerValue === null ? 'null' : headerValue}`;
+                }
+              } catch (error) {
+                assertionPassed = false;
+                assertionResult = `Error validating header: ${error instanceof Error ? error.message : 'Unknown error'}`;
+              }
+              break;
+          }
+
+          if (!assertionPassed) {
+            allAssertionsPassed = false;
+          }
+
+          logEntry.push(
+            `Assertion: ${assertion.type.toUpperCase()} - ${assertion.path || 'N/A'}`,
+            `Operator: ${assertion.operator}`,
+            `Expected: ${assertion.value}`,
+            `Result: ${assertionPassed ? 'PASSED' : 'FAILED'}`,
+            `Details: ${assertionResult}`,
+            ''
+          );
+        } catch (error) {
+          allAssertionsPassed = false;
+          logEntry.push(
+            `Assertion: ${assertion.type.toUpperCase()} - ${assertion.path || 'N/A'}`,
+            `Result: FAILED`,
+            `Error: ${error.message}`,
+            ''
+          );
+        }
+      }
+
+      // Update test status
+      setTests(prevTests =>
+        prevTests.map(t =>
+          t.name === test.name
+            ? {
+                ...t,
+                status: allAssertionsPassed ? 'passed' : 'failed',
+                duration: responseTime
+              }
+            : t
+        )
+      );
+
+      // Add logs
+      setLogs(prevLogs => ({
+        ...prevLogs,
+        [test.name]: logEntry
+      }));
+
     } catch (error) {
       console.error('Error executing test:', error);
-      enqueueSnackbar(error instanceof Error ? error.message : 'Error executing test', { variant: 'error' });
+      setTests(prevTests =>
+        prevTests.map(t =>
+          t.name === test.name
+            ? {
+                ...t,
+                status: 'failed',
+                error: error.message
+              }
+            : t
+        )
+      );
+
+      setLogs(prevLogs => ({
+        ...prevLogs,
+        [test.name]: [
+          `Test: ${test.name}`,
+          `Status: FAILED`,
+          '',
+          'Error Details:',
+          error.message,
+          '',
+          'Request Details:',
+          `Method: ${request?.method || 'N/A'}`,
+          `Endpoint: ${request?.endpoint || 'N/A'}`,
+          `Environment: ${request?.environment || 'N/A'}`
+        ]
+      }));
     }
   };
 

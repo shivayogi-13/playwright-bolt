@@ -104,13 +104,7 @@ function ReportsPanel() {
                 ]}
                 width={400}
                 height={300}
-                sx={{
-                  '& .MuiPieArc-root': {
-                    fill: (item: { index: number }) => pieChartColors[item.index % pieChartColors.length],
-                    stroke: '#fff',
-                    strokeWidth: 1,
-                  },
-                }}
+                colors={pieChartColors}
               />
             </CardContent>
           </Card>

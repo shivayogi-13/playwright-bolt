@@ -28,6 +28,7 @@ import {
   Collapse,
   TableSortLabel,
   useTheme,
+  SelectChangeEvent,
 } from '@mui/material';
 import {
   Add as AddIcon,
@@ -43,25 +44,29 @@ import { useSnackbar } from 'notistack';
 import * as XLSX from 'xlsx';
 
 interface ApiRequest {
+  id: string;
   name: string;
   method: string;
   endpoint: string;
-  headers: string;
+  headers: { key: string; value: string }[];
   body: string;
   expectedStatus: number;
   suite: string;
-  assertions: Assertion[];
   environment: string;
-  id: string;
+  assertions: Assertion[];
+  responseVariable?: string;
+  cookieVariable?: string;
 }
 
 interface Assertion {
-  field: string;
+  id: string;
+  type: 'status' | 'body' | 'header';
+  path: string;
   operator: string;
   value: string;
-  type: string;
-  validationType?: 'value' | 'schema';
-  schema?: string;
+  validationType: 'value' | 'schema';
+  schema: string;
+  keyValuePairs: { key: string; value: string }[];
 }
 
 interface Environment {
@@ -74,13 +79,13 @@ const defaultApiRequest: ApiRequest = {
   name: '',
   method: 'GET',
   endpoint: '',
-  headers: '{}',
+  headers: [],
   body: '{}',
   expectedStatus: 200,
-  suite: 'regression',
   assertions: [],
-  environment: '',
   id: '',
+  suite: '',
+  environment: '',
 };
 
 const STORAGE_KEYS = {
@@ -108,10 +113,10 @@ function ApiRequestsPanel() {
   const [expanded, setExpanded] = useState<ExpandedState>({});
   const [isEditing, setIsEditing] = useState(false);
   const [editIndex, setEditIndex] = useState<number | null>(null);
-  const [environments, setEnvironments] = useState<Environment[]>([]);
-  const [selectedEnvironment, setSelectedEnvironment] = useState<string>('');
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [requestToDelete, setRequestToDelete] = useState<string>('');
+  const [environments, setEnvironments] = useState<Environment[]>([]);
+  const [selectedEnvironment, setSelectedEnvironment] = useState<string>('');
 
   // Load saved data on mount
   useEffect(() => {
@@ -121,7 +126,15 @@ function ApiRequestsPanel() {
         const savedEnvironments = localStorage.getItem(STORAGE_KEYS.ENVIRONMENTS);
 
         if (savedRequests) {
-          setApiRequests(JSON.parse(savedRequests));
+          const parsedRequests = JSON.parse(savedRequests);
+          // Ensure each request has an assertions array
+          const requestsWithAssertions = parsedRequests.map((request: ApiRequest) => ({
+            ...request,
+            assertions: request.assertions || []
+          }));
+          setApiRequests(requestsWithAssertions);
+        } else {
+          setApiRequests([]);
         }
 
         if (savedEnvironments) {
@@ -140,6 +153,7 @@ function ApiRequestsPanel() {
       } catch (error) {
         console.error('Error loading saved data:', error);
         enqueueSnackbar('Error loading saved data', { variant: 'error' });
+        setApiRequests([]);
       }
     };
 
@@ -172,55 +186,178 @@ function ApiRequestsPanel() {
     setIsApiDialogOpen(true);
   };
 
+  const handleAddRequest = () => {
+    setCurrentApiRequest({
+      name: '',
+      method: 'GET',
+      endpoint: '',
+      headers: [],
+      body: '',
+      expectedStatus: 200,
+      assertions: [],
+      id: '',
+      suite: '',
+      environment: selectedEnvironment,
+    });
+    setIsApiDialogOpen(true);
+  };
+
   const handleApiRequestSave = () => {
-    if (currentApiRequest.name && currentApiRequest.endpoint) {
-      try {
-        const assertions = currentApiRequest.assertions?.map(assertion => {
-          if (assertion.validationType === 'schema' && assertion.schema) {
-            try {
-              JSON.parse(assertion.schema);
-              return {
-                ...assertion,
-                schema: assertion.schema
-              };
-            } catch (error) {
-              throw new Error(`Invalid JSON Schema in assertion for field ${assertion.field}: ${error instanceof Error ? error.message : String(error)}`);
-            }
-          }
-          return assertion;
-        }) || [];
+    if (!currentApiRequest.name || !currentApiRequest.endpoint) {
+      enqueueSnackbar('Please fill in all required fields', { variant: 'error' });
+      return;
+    }
 
-        const newRequest: ApiRequest = {
-          name: currentApiRequest.name,
-          method: currentApiRequest.method,
-          endpoint: currentApiRequest.endpoint,
-          headers: currentApiRequest.headers,
-          body: currentApiRequest.body,
-          expectedStatus: currentApiRequest.expectedStatus,
-          suite: currentApiRequest.suite,
-          assertions,
-          environment: selectedEnvironment,
-          id: Date.now().toString(),
+    const updatedRequests = [...apiRequests];
+    if (currentApiRequest.id) {
+      const index = updatedRequests.findIndex(r => r.id === currentApiRequest.id);
+      if (index !== -1) {
+        // Ensure assertions are properly saved with all required fields
+        updatedRequests[index] = {
+          ...currentApiRequest,
+          assertions: currentApiRequest.assertions.map(assertion => ({
+            id: assertion.id || Date.now().toString(),
+            type: assertion.type || 'body',
+            path: assertion.path || '',
+            operator: assertion.operator || 'equals',
+            value: assertion.value || '',
+            validationType: assertion.validationType || 'value',
+            schema: assertion.schema || '',
+            keyValuePairs: assertion.keyValuePairs || []
+          }))
         };
-
-        const updatedRequests = [...apiRequests];
-        if (isEditing && editIndex !== null) {
-          updatedRequests[editIndex] = newRequest;
-        } else {
-          updatedRequests.push(newRequest);
-        }
-
-        setApiRequests(updatedRequests);
-        localStorage.setItem(STORAGE_KEYS.API_REQUESTS, JSON.stringify(updatedRequests));
-        setIsApiDialogOpen(false);
-        enqueueSnackbar('API request saved successfully', { variant: 'success' });
-      } catch (error) {
-        console.error('Error saving API request:', error);
-        enqueueSnackbar(error instanceof Error ? error.message : 'Error saving API request', { variant: 'error' });
       }
     } else {
-      enqueueSnackbar('Please fill in all required fields', { variant: 'warning' });
+      // For new requests, ensure assertions array is properly initialized
+      updatedRequests.push({
+        ...currentApiRequest,
+        id: Date.now().toString(),
+        assertions: currentApiRequest.assertions.map(assertion => ({
+          id: assertion.id || Date.now().toString(),
+          type: assertion.type || 'body',
+          path: assertion.path || '',
+          operator: assertion.operator || 'equals',
+          value: assertion.value || '',
+          validationType: assertion.validationType || 'value',
+          schema: assertion.schema || '',
+          keyValuePairs: assertion.keyValuePairs || []
+        }))
+      });
     }
+
+    setApiRequests(updatedRequests);
+    localStorage.setItem(STORAGE_KEYS.API_REQUESTS, JSON.stringify(updatedRequests));
+    setIsApiDialogOpen(false);
+    enqueueSnackbar('API request saved successfully', { variant: 'success' });
+  };
+
+  // Add assertion handlers
+  const handleAddAssertion = () => {
+    if (currentApiRequest) {
+      const newAssertion: Assertion = {
+        type: 'body',
+        path: '',
+        operator: 'equals',
+        value: '',
+        validationType: 'value',
+        schema: '',
+        keyValuePairs: [],
+        id: Date.now().toString()
+      };
+      setCurrentApiRequest({
+        ...currentApiRequest,
+        assertions: [...currentApiRequest.assertions, newAssertion]
+      });
+    }
+  };
+
+  const handleAddKeyValuePair = (assertionId: string) => {
+    if (currentApiRequest) {
+      setCurrentApiRequest({
+        ...currentApiRequest,
+        assertions: currentApiRequest.assertions.map(assertion => {
+          if (assertion.id === assertionId) {
+            return {
+              ...assertion,
+              keyValuePairs: [
+                ...(assertion.keyValuePairs || []),
+                { key: '', value: '' }
+              ]
+            };
+          }
+          return assertion;
+        })
+      });
+    }
+  };
+
+  const handleUpdateKeyValuePair = (assertionId: string, index: number, field: 'key' | 'value', value: string) => {
+    if (currentApiRequest) {
+      setCurrentApiRequest({
+        ...currentApiRequest,
+        assertions: currentApiRequest.assertions.map(assertion => {
+          if (assertion.id === assertionId) {
+            const updatedPairs = [...(assertion.keyValuePairs || [])];
+            updatedPairs[index] = { ...updatedPairs[index], [field]: value };
+            return { ...assertion, keyValuePairs: updatedPairs };
+          }
+          return assertion;
+        })
+      });
+    }
+  };
+
+  const handleRemoveKeyValuePair = (assertionId: string, index: number) => {
+    if (currentApiRequest) {
+      setCurrentApiRequest({
+        ...currentApiRequest,
+        assertions: currentApiRequest.assertions.map(assertion => {
+          if (assertion.id === assertionId) {
+            const updatedPairs = [...(assertion.keyValuePairs || [])];
+            updatedPairs.splice(index, 1);
+            return { ...assertion, keyValuePairs: updatedPairs };
+          }
+          return assertion;
+        })
+      });
+    }
+  };
+
+  const handleCopyAssertion = (assertion: Assertion) => {
+    if (currentApiRequest) {
+      const newAssertion: Assertion = {
+        ...assertion,
+        id: Date.now().toString()
+      };
+      setCurrentApiRequest({
+        ...currentApiRequest,
+        assertions: [...currentApiRequest.assertions, newAssertion]
+      });
+    }
+  };
+
+  const handleDeleteAssertion = (id: string) => {
+    if (currentApiRequest) {
+      setCurrentApiRequest({
+        ...currentApiRequest,
+        assertions: currentApiRequest.assertions.filter(a => a.id !== id)
+      });
+    }
+  };
+
+  const handleUpdateAssertion = (id: string, field: keyof Assertion, value: string) => {
+    setCurrentApiRequest(prev => ({
+      ...prev,
+      assertions: prev.assertions.map(assertion => {
+        if (assertion.id === id) {
+          return {
+            ...assertion,
+            [field]: value
+          };
+        }
+        return assertion;
+      })
+    }));
   };
 
   const handleDeleteApiRequest = (index: number) => {
@@ -242,7 +379,7 @@ function ApiRequestsPanel() {
   };
 
   const handleDragEnd = (result: DropResult) => {
-    if (!result.destination) return;
+    if (!result.destination || !apiRequests) return;
 
     const items = Array.from(apiRequests);
     const [reorderedItem] = items.splice(result.source.index, 1);
@@ -266,14 +403,42 @@ function ApiRequestsPanel() {
     try {
       const template = [
         {
-          name: 'Example GET Request',
-          method: 'GET',
-          endpoint: '/api/example',
-          headers: '{"Authorization": "Bearer ${token}"}',
-          body: '{}',
-          expectedStatus: 200,
-          suite: TEST_SUITES.REGRESSION,
-        },
+          'Name': 'Sample API Request',
+          'Method': 'GET',
+          'Endpoint': '/api/endpoint',
+          'Headers': JSON.stringify({
+            "Content-Type": "application/json",
+            "Authorization": "Bearer {token}"
+          }, null, 2),
+          'Body': JSON.stringify({
+            "key": "value"
+          }, null, 2),
+          'Expected Status': 200,
+          'Suite': 'default',
+          'Environment': 'dev',
+          'Assertions': JSON.stringify([
+            {
+              id: "1",
+              type: "body",
+              path: "data.id",
+              operator: "equals",
+              value: "123",
+              validationType: "value",
+              schema: "",
+              keyValuePairs: []
+            },
+            {
+              id: "2",
+              type: "status",
+              path: "",
+              operator: "equals",
+              value: "200",
+              validationType: "value",
+              schema: "",
+              keyValuePairs: []
+            }
+          ], null, 2)
+        }
       ];
 
       const ws = XLSX.utils.json_to_sheet(template);
@@ -350,6 +515,67 @@ function ApiRequestsPanel() {
     enqueueSnackbar('API request deleted successfully', { variant: 'success' });
   };
 
+  const handleApiRequestEdit = (request: ApiRequest) => {
+    setCurrentApiRequest({
+      ...request,
+      suite: request.suite || '',
+      id: request.id || '',
+      headers: request.headers || [],
+      body: request.body || '',
+      environment: request.environment || selectedEnvironment,
+      assertions: request.assertions.map(assertion => ({
+        ...assertion,
+        id: assertion.id || Date.now().toString(),
+        type: assertion.type || 'body',
+        path: assertion.path || '',
+        operator: assertion.operator || 'equals',
+        value: assertion.value || '',
+        validationType: assertion.validationType || 'value',
+        schema: assertion.schema || '',
+        keyValuePairs: assertion.keyValuePairs || []
+      }))
+    });
+    setIsApiDialogOpen(true);
+  };
+
+  const handleHeaderChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    try {
+      const headerLines = e.target.value.split('\n').filter(line => line.trim());
+      const headers = headerLines.map(line => {
+        const [key, ...valueParts] = line.split(':');
+        return {
+          key: key.trim(),
+          value: valueParts.join(':').trim()
+        };
+      }).filter(header => header.key && header.value);
+      
+      setCurrentApiRequest(prev => ({
+        ...prev,
+        headers
+      }));
+    } catch (error) {
+      console.error('Error parsing headers:', error);
+    }
+  };
+
+  const handleAddEnvironment = () => {
+    // Implementation for adding a new environment
+  };
+
+  const handleEditEnvironment = (env: Environment) => {
+    // Implementation for editing an environment
+  };
+
+  const handleDeleteEnvironment = (name: string) => {
+    // Implementation for deleting an environment
+  };
+
+  const handleEnvironmentChange = (event: SelectChangeEvent) => {
+    const newEnvironment = event.target.value;
+    setSelectedEnvironment(newEnvironment);
+    localStorage.setItem(STORAGE_KEYS.SELECTED_ENVIRONMENT, newEnvironment);
+  };
+
   return (
     <Box sx={{ p: 3 }}>
       <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
@@ -357,6 +583,20 @@ function ApiRequestsPanel() {
           API Requests
         </Typography>
         <Box sx={{ display: 'flex', gap: 2 }}>
+          <FormControl size="small" sx={{ minWidth: 200 }}>
+            <InputLabel>Select Environment</InputLabel>
+            <Select
+              value={selectedEnvironment}
+              label="Select Environment"
+              onChange={handleEnvironmentChange}
+            >
+              {environments.map((env) => (
+                <MenuItem key={env.name} value={env.name}>
+                  {env.name}
+                </MenuItem>
+              ))}
+            </Select>
+          </FormControl>
           <Button
             variant="outlined"
             size="small"
@@ -394,28 +634,8 @@ function ApiRequestsPanel() {
         <Grid item xs={12}>
           <Card>
             <CardContent>
-              <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
-                <Typography variant="h6" sx={{ color: 'primary.main', fontWeight: 'bold' }}>
-                  API Requests
-                </Typography>
-                <FormControl size="small" sx={{ minWidth: 200 }}>
-                  <InputLabel>Select Environment</InputLabel>
-                  <Select
-                    value={selectedEnvironment}
-                    label="Select Environment"
-                    onChange={(e) => setSelectedEnvironment(e.target.value)}
-                  >
-                    {environments.map((env) => (
-                      <MenuItem key={env.name} value={env.name}>
-                        {env.name}
-                      </MenuItem>
-                    ))}
-                  </Select>
-                </FormControl>
-              </Box>
-
               <DragDropContext onDragEnd={handleDragEnd}>
-                <Droppable droppableId="apiRequests">
+                <Droppable droppableId="api-requests">
                   {(provided) => (
                     <TableContainer 
                       component={Paper} 
@@ -432,21 +652,23 @@ function ApiRequestsPanel() {
                             <TableCell>Endpoint</TableCell>
                             <TableCell>Suite</TableCell>
                             <TableCell>Status</TableCell>
+                            <TableCell>Assertions</TableCell>
                             <TableCell>Actions</TableCell>
                           </TableRow>
                         </TableHead>
                         <TableBody>
-                          {apiRequests.map((request, index) => (
-                            <Draggable key={request.name} draggableId={request.name} index={index}>
-                              {(provided, snapshot) => (
+                          {(apiRequests || []).map((request, index) => (
+                            <Draggable
+                              key={request.id || `request-${index}`}
+                              draggableId={request.id || `request-${index}`}
+                              index={index}
+                            >
+                              {(provided) => (
                                 <React.Fragment>
                                   <TableRow
                                     ref={provided.innerRef}
                                     {...provided.draggableProps}
-                                    style={{
-                                      ...provided.draggableProps.style,
-                                      background: snapshot.isDragging ? 'rgba(0, 0, 0, 0.04)' : 'inherit',
-                                    }}
+                                    {...provided.dragHandleProps}
                                   >
                                     <TableCell {...provided.dragHandleProps} sx={{ cursor: 'move', width: '40px' }}>
                                       <DragIndicatorIcon fontSize="small" />
@@ -470,58 +692,95 @@ function ApiRequestsPanel() {
                                     </TableCell>
                                     <TableCell>{request.expectedStatus}</TableCell>
                                     <TableCell>
+                                      <Chip 
+                                        label={`${request.assertions.length} assertions`}
+                                        size="small"
+                                        color="primary"
+                                        variant="outlined"
+                                      />
+                                    </TableCell>
+                                    <TableCell>
                                       <Box sx={{ display: 'flex', gap: 1 }}>
-                                        <IconButton
-                                          size="small"
-                                          color="primary"
-                                          onClick={() => handleEditApiRequest(index)}
-                                        >
-                                          <EditIcon fontSize="small" />
-                                        </IconButton>
-                                        <IconButton
-                                          size="small"
-                                          onClick={() => handleCopyRequest(request)}
-                                        >
-                                          <ContentCopyIcon fontSize="small" />
-                                        </IconButton>
-                                        <IconButton
-                                          size="small"
-                                          onClick={() => handleDeleteRequest(request.id)}
-                                          color="error"
-                                        >
-                                          <DeleteIcon fontSize="small" />
-                                        </IconButton>
+                                        <Tooltip title="Edit">
+                                          <IconButton
+                                            size="small"
+                                            color="primary"
+                                            onClick={() => handleApiRequestEdit(request)}
+                                          >
+                                            <EditIcon fontSize="small" />
+                                          </IconButton>
+                                        </Tooltip>
+                                        <Tooltip title="Copy">
+                                          <IconButton
+                                            size="small"
+                                            onClick={() => handleCopyRequest(request)}
+                                          >
+                                            <ContentCopyIcon fontSize="small" />
+                                          </IconButton>
+                                        </Tooltip>
+                                        <Tooltip title="Delete">
+                                          <IconButton
+                                            size="small"
+                                            onClick={() => handleDeleteRequest(request.id)}
+                                            color="error"
+                                          >
+                                            <DeleteIcon fontSize="small" />
+                                          </IconButton>
+                                        </Tooltip>
                                       </Box>
                                     </TableCell>
                                   </TableRow>
                                   <TableRow>
-                                    <TableCell style={{ paddingBottom: 0, paddingTop: 0 }} colSpan={7}>
-                                      <Collapse in={expanded[index]} timeout="auto" unmountOnExit>
+                                    <TableCell style={{ paddingBottom: 0, paddingTop: 0 }} colSpan={8}>
+                                      <Collapse in={expanded[index] ?? false} timeout="auto" unmountOnExit>
                                         <Box sx={{ margin: 1 }}>
                                           <Grid container spacing={2}>
-                                            <Grid item xs={12} md={6}>
-                                              <Typography variant="subtitle2">Headers:</Typography>
-                                              <pre style={{ 
-                                                backgroundColor: '#f5f5f5',
-                                                padding: '10px',
-                                                borderRadius: '4px',
-                                                overflow: 'auto',
-                                                fontSize: '0.875rem'
-                                              }}>
-                                                {request.headers}
-                                              </pre>
-                                            </Grid>
-                                            <Grid item xs={12} md={6}>
-                                              <Typography variant="subtitle2">Body:</Typography>
-                                              <pre style={{ 
-                                                backgroundColor: '#f5f5f5',
-                                                padding: '10px',
-                                                borderRadius: '4px',
-                                                overflow: 'auto',
-                                                fontSize: '0.875rem'
-                                              }}>
-                                                {request.body}
-                                              </pre>
+                                            <Grid item xs={12}>
+                                              <Typography variant="subtitle2" gutterBottom>
+                                                Assertions
+                                              </Typography>
+                                              {request.assertions.map((assertion, assertionIndex) => (
+                                                <Box key={assertion.id} sx={{ mb: 2, p: 2, border: '1px solid', borderColor: 'divider', borderRadius: 1 }}>
+                                                  <Grid container spacing={2}>
+                                                    <Grid item xs={12} sm={3}>
+                                                      <Typography variant="body2" color="text.secondary">
+                                                        Type: {assertion.type}
+                                                      </Typography>
+                                                    </Grid>
+                                                    {assertion.type !== 'status' && (
+                                                      <Grid item xs={12} sm={3}>
+                                                        <Typography variant="body2" color="text.secondary">
+                                                          Path: {assertion.path}
+                                                        </Typography>
+                                                      </Grid>
+                                                    )}
+                                                    <Grid item xs={12} sm={3}>
+                                                      <Typography variant="body2" color="text.secondary">
+                                                        Operator: {assertion.operator}
+                                                      </Typography>
+                                                    </Grid>
+                                                    {assertion.operator !== 'keyValue' && (
+                                                      <Grid item xs={12} sm={3}>
+                                                        <Typography variant="body2" color="text.secondary">
+                                                          Value: {assertion.value}
+                                                        </Typography>
+                                                      </Grid>
+                                                    )}
+                                                    {assertion.operator === 'keyValue' && (
+                                                      <Grid item xs={12}>
+                                                        <Typography variant="body2" color="text.secondary">
+                                                          Key-Value Pairs:
+                                                        </Typography>
+                                                        {(assertion.keyValuePairs ?? []).map((pair, pairIndex) => (
+                                                          <Typography key={pairIndex} variant="body2" color="text.secondary">
+                                                            {pair.key}: {pair.value}
+                                                          </Typography>
+                                                        ))}
+                                                      </Grid>
+                                                    )}
+                                                  </Grid>
+                                                </Box>
+                                              ))}
                                             </Grid>
                                           </Grid>
                                         </Box>
@@ -544,8 +803,15 @@ function ApiRequestsPanel() {
         </Grid>
       </Grid>
 
-      <Dialog open={isApiDialogOpen} onClose={handleApiDialogClose} maxWidth="md" fullWidth>
-        <DialogTitle>{isEditing ? 'Edit' : 'Add'} API Request</DialogTitle>
+      <Dialog
+        open={isApiDialogOpen}
+        onClose={() => setIsApiDialogOpen(false)}
+        maxWidth="md"
+        fullWidth
+      >
+        <DialogTitle>
+          {currentApiRequest.id ? 'Edit' : 'Add'} API Request
+        </DialogTitle>
         <DialogContent>
           <Grid container spacing={2} sx={{ mt: 1 }}>
             <Grid item xs={12}>
@@ -554,16 +820,16 @@ function ApiRequestsPanel() {
                 required
                 label="Request Name"
                 value={currentApiRequest.name}
-                onChange={(e) => setCurrentApiRequest({ ...currentApiRequest, name: e.target.value })}
+                onChange={(e) => setCurrentApiRequest(prev => ({ ...prev, name: e.target.value }))}
               />
             </Grid>
             <Grid item xs={12} sm={6}>
-              <FormControl fullWidth required>
+              <FormControl fullWidth>
                 <InputLabel>Method</InputLabel>
                 <Select
                   value={currentApiRequest.method}
                   label="Method"
-                  onChange={(e) => setCurrentApiRequest({ ...currentApiRequest, method: e.target.value })}
+                  onChange={(e) => setCurrentApiRequest(prev => ({ ...prev, method: e.target.value }))}
                 >
                   <MenuItem value="GET">GET</MenuItem>
                   <MenuItem value="POST">POST</MenuItem>
@@ -584,6 +850,22 @@ function ApiRequestsPanel() {
                   <MenuItem value={TEST_SUITES.REGRESSION}>Regression Tests</MenuItem>
                   <MenuItem value={TEST_SUITES.SANITY}>Sanity Tests</MenuItem>
                   <MenuItem value={TEST_SUITES.PERFORMANCE}>Performance Tests</MenuItem>
+                </Select>
+              </FormControl>
+            </Grid>
+            <Grid item xs={12} sm={6}>
+              <FormControl fullWidth required>
+                <InputLabel>Environment</InputLabel>
+                <Select
+                  value={currentApiRequest.environment}
+                  label="Environment"
+                  onChange={(e) => setCurrentApiRequest({ ...currentApiRequest, environment: e.target.value })}
+                >
+                  {environments.map((env) => (
+                    <MenuItem key={env.name} value={env.name}>
+                      {env.name}
+                    </MenuItem>
+                  ))}
                 </Select>
               </FormControl>
             </Grid>
@@ -615,12 +897,11 @@ function ApiRequestsPanel() {
             <Grid item xs={12}>
               <TextField
                 fullWidth
-                label="Headers"
                 multiline
                 rows={3}
-                value={currentApiRequest.headers}
-                onChange={(e) => setCurrentApiRequest({ ...currentApiRequest, headers: e.target.value })}
-                helperText="Enter headers in JSON format"
+                value={currentApiRequest.headers.map(h => `${h.key}: ${h.value}`).join('\n')}
+                onChange={handleHeaderChange}
+                helperText="Enter headers in 'key: value' format (one per line)"
               />
             </Grid>
             <Grid item xs={12}>
@@ -634,11 +915,168 @@ function ApiRequestsPanel() {
                 helperText="Enter request body in JSON format"
               />
             </Grid>
+
+            {/* Assertions Section */}
+            <Grid item xs={12}>
+              <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
+                <Typography variant="h6">Response Assertions</Typography>
+                <Button
+                  variant="outlined"
+                  startIcon={<AddIcon />}
+                  onClick={handleAddAssertion}
+                >
+                  Add Assertion
+                </Button>
+              </Box>
+              {currentApiRequest.assertions.map((assertion) => (
+                <Box key={assertion.id} sx={{ mb: 2, p: 2, border: '1px solid', borderColor: 'divider', borderRadius: 1 }}>
+                  <Grid container spacing={2}>
+                    <Grid item xs={12} sm={3}>
+                      <FormControl fullWidth>
+                        <InputLabel>Type</InputLabel>
+                        <Select
+                          value={assertion.type}
+                          label="Type"
+                          onChange={(e) => handleUpdateAssertion(assertion.id, 'type', e.target.value)}
+                        >
+                          <MenuItem value="status">Status</MenuItem>
+                          <MenuItem value="body">Body</MenuItem>
+                          <MenuItem value="header">Headers</MenuItem>
+                        </Select>
+                      </FormControl>
+                    </Grid>
+                    {assertion.type !== 'status' && (
+                      <Grid item xs={12} sm={3}>
+                        <TextField
+                          fullWidth
+                          label="Path"
+                          value={assertion.path}
+                          onChange={(e) => handleUpdateAssertion(assertion.id, 'path', e.target.value)}
+                          helperText="JSON path or header name"
+                        />
+                      </Grid>
+                    )}
+                    <Grid item xs={12} sm={3}>
+                      <FormControl fullWidth>
+                        <InputLabel>Operator</InputLabel>
+                        <Select
+                          value={assertion.operator}
+                          label="Operator"
+                          onChange={(e) => handleUpdateAssertion(assertion.id, 'operator', e.target.value)}
+                        >
+                          <MenuItem value="equals">Equals</MenuItem>
+                          <MenuItem value="contains">Contains</MenuItem>
+                          <MenuItem value="matches">Matches</MenuItem>
+                          <MenuItem value="exists">Exists</MenuItem>
+                          <MenuItem value="keyValue">Key-Value Pairs</MenuItem>
+                        </Select>
+                      </FormControl>
+                    </Grid>
+                    {assertion.operator !== 'keyValue' && (
+                      <Grid item xs={12} sm={3}>
+                        <TextField
+                          fullWidth
+                          label="Value"
+                          value={assertion.value}
+                          onChange={(e) => handleUpdateAssertion(assertion.id, 'value', e.target.value)}
+                        />
+                      </Grid>
+                    )}
+                    {assertion.operator === 'keyValue' && (
+                      <Grid item xs={12}>
+                        <Box sx={{ mb: 2 }}>
+                          <Typography variant="subtitle2" gutterBottom>
+                            Key-Value Pairs:
+                          </Typography>
+                          {(assertion.keyValuePairs ?? []).map((pair, index) => (
+                            <Box key={index} sx={{ display: 'flex', gap: 2, mb: 1 }}>
+                              <TextField
+                                fullWidth
+                                label="Key"
+                                value={pair.key}
+                                onChange={(e) => handleUpdateKeyValuePair(assertion.id, index, 'key', e.target.value)}
+                              />
+                              <TextField
+                                fullWidth
+                                label="Value"
+                                value={pair.value}
+                                onChange={(e) => handleUpdateKeyValuePair(assertion.id, index, 'value', e.target.value)}
+                              />
+                              <IconButton
+                                color="error"
+                                onClick={() => handleRemoveKeyValuePair(assertion.id, index)}
+                              >
+                                <DeleteIcon />
+                              </IconButton>
+                            </Box>
+                          ))}
+                          <Button
+                            variant="outlined"
+                            startIcon={<AddIcon />}
+                            onClick={() => handleAddKeyValuePair(assertion.id)}
+                            sx={{ mt: 1 }}
+                          >
+                            Add Key-Value Pair
+                          </Button>
+                        </Box>
+                      </Grid>
+                    )}
+                    <Grid item xs={12}>
+                      <FormControl fullWidth>
+                        <InputLabel>Validation Type</InputLabel>
+                        <Select
+                          value={assertion.validationType}
+                          label="Validation Type"
+                          onChange={(e) => handleUpdateAssertion(assertion.id, 'validationType', e.target.value)}
+                        >
+                          <MenuItem value="value">Value</MenuItem>
+                          <MenuItem value="schema">Schema</MenuItem>
+                        </Select>
+                      </FormControl>
+                    </Grid>
+                    {assertion.validationType === 'schema' && (
+                      <Grid item xs={12}>
+                        <TextField
+                          fullWidth
+                          label="Schema"
+                          multiline
+                          rows={4}
+                          value={assertion.schema}
+                          onChange={(e) => handleUpdateAssertion(assertion.id, 'schema', e.target.value)}
+                          helperText="Enter JSON schema for validation"
+                        />
+                      </Grid>
+                    )}
+                    <Grid item xs={12}>
+                      <Box sx={{ display: 'flex', gap: 1, justifyContent: 'flex-end' }}>
+                        <Button
+                          variant="outlined"
+                          startIcon={<ContentCopyIcon />}
+                          onClick={() => handleCopyAssertion(assertion)}
+                        >
+                          Copy
+                        </Button>
+                        <Button
+                          variant="outlined"
+                          color="error"
+                          startIcon={<DeleteIcon />}
+                          onClick={() => handleDeleteAssertion(assertion.id)}
+                        >
+                          Delete
+                        </Button>
+                      </Box>
+                    </Grid>
+                  </Grid>
+                </Box>
+              ))}
+            </Grid>
           </Grid>
         </DialogContent>
         <DialogActions>
-          <Button onClick={handleApiDialogClose}>Cancel</Button>
-          <Button onClick={handleApiRequestSave} variant="contained">Save</Button>
+          <Button onClick={() => setIsApiDialogOpen(false)}>Cancel</Button>
+          <Button onClick={handleApiRequestSave} variant="contained">
+            Save
+          </Button>
         </DialogActions>
       </Dialog>
 
