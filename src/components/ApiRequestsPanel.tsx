@@ -29,6 +29,9 @@ import {
   TableSortLabel,
   useTheme,
   SelectChangeEvent,
+  Tabs,
+  Tab,
+  InputAdornment,
 } from '@mui/material';
 import {
   Add as AddIcon,
@@ -38,10 +41,15 @@ import {
   DragIndicator as DragIndicatorIcon,
   Download as DownloadIcon,
   UploadFile as UploadFileIcon,
+  Stop as StopIcon,
+  PlayArrow as PlayArrowIcon,
+  Visibility as VisibilityIcon,
+  VisibilityOff as VisibilityOffIcon,
 } from '@mui/icons-material';
 import { DragDropContext, Droppable, Draggable, DropResult } from 'react-beautiful-dnd';
 import { useSnackbar } from 'notistack';
 import * as XLSX from 'xlsx';
+import { TOTP } from 'otpauth';
 
 interface ApiRequest {
   id: string;
@@ -56,6 +64,11 @@ interface ApiRequest {
   assertions: Assertion[];
   responseVariable?: string;
   cookieVariable?: string;
+  cookieCaptureUrl?: string;
+  capturedCookies?: { [key: string]: string };
+  loginUrl?: string;
+  username?: string;
+  password?: string;
 }
 
 interface Assertion {
@@ -73,6 +86,26 @@ interface Environment {
   name: string;
   baseUrl: string;
   parameters: { [key: string]: string };
+}
+
+interface NetworkRequest {
+  id: string;
+  name: string;
+  method: string;
+  endpoint: string;
+  headers: { key: string; value: string }[];
+  body: string;
+  response: string;
+  status: number;
+  timestamp: number;
+}
+
+interface Configuration {
+  cookieCaptureUrl?: string;
+  capturedCookies?: { [key: string]: string };
+  loginUrl?: string;
+  username?: string;
+  password?: string;
 }
 
 const defaultApiRequest: ApiRequest = {
@@ -105,6 +138,395 @@ interface ExpandedState {
   [key: number]: boolean;
 }
 
+interface ConfigurationTabProps {
+  config: ApiRequest;
+  onConfigChange: (config: ApiRequest) => void;
+}
+
+const ConfigurationTab: React.FC<ConfigurationTabProps> = ({ config, onConfigChange }) => {
+  const [isCapturingCookies, setIsCapturingCookies] = useState(false);
+  const [cookieCaptureWindow, setCookieCaptureWindow] = useState<Window | null>(null);
+  const [totpSecret, setTotpSecret] = useState('');
+  const [currentTotpCode, setCurrentTotpCode] = useState('');
+  const [showTotpSecret, setShowTotpSecret] = useState(false);
+  const [showTotpCode, setShowTotpCode] = useState(false);
+  const { enqueueSnackbar } = useSnackbar();
+
+  // Generate TOTP code every 30 seconds
+  useEffect(() => {
+    if (!totpSecret) return;
+
+    const generateTotpCode = () => {
+      try {
+        const totp = new TOTP({
+          secret: totpSecret,
+          algorithm: 'SHA1',
+          digits: 6,
+          period: 30
+        });
+        const code = totp.generate();
+        setCurrentTotpCode(code);
+      } catch (error) {
+        console.error('Error generating TOTP code:', error);
+        enqueueSnackbar('Error generating TOTP code', { variant: 'error' });
+      }
+    };
+
+    // Generate initial code
+    generateTotpCode();
+
+    // Update code every 30 seconds
+    const interval = setInterval(generateTotpCode, 30000);
+
+    return () => clearInterval(interval);
+  }, [totpSecret, enqueueSnackbar]);
+
+  const startCookieCapture = () => {
+    if (!config.loginUrl) {
+      enqueueSnackbar('Please enter a login URL', { variant: 'error' });
+      return;
+    }
+
+    if (!config.username || !config.password) {
+      enqueueSnackbar('Please enter username and password', { variant: 'error' });
+      return;
+    }
+
+    if (!totpSecret) {
+      enqueueSnackbar('Please enter TOTP secret', { variant: 'error' });
+      return;
+    }
+
+    console.log('Starting cookie capture with login...');
+    setIsCapturingCookies(true);
+
+    // Open a new window for cookie capture
+    const newWindow = window.open(config.loginUrl, '_blank', 'width=1200,height=800');
+    if (!newWindow) {
+      console.error('Failed to open new window');
+      enqueueSnackbar('Failed to open new window. Please allow popups.', { variant: 'error' });
+      setIsCapturingCookies(false);
+      return;
+    }
+
+    setCookieCaptureWindow(newWindow);
+    enqueueSnackbar('Browser window opened for login and cookie capture', { variant: 'info' });
+
+    // Set up message handler for cookie capture
+    const messageHandler = (event: MessageEvent) => {
+      if (event.data && event.data.type === 'COOKIES_CAPTURED') {
+        console.log('Received cookies:', event.data.cookies);
+        onConfigChange({
+          ...config,
+          capturedCookies: event.data.cookies
+        });
+        setIsCapturingCookies(false);
+        if (cookieCaptureWindow) {
+          cookieCaptureWindow.close();
+        }
+        enqueueSnackbar('Cookies captured successfully', { variant: 'success' });
+      }
+    };
+
+    window.addEventListener('message', messageHandler);
+    (window as any).cookieMessageHandler = messageHandler;
+
+    // Inject login and cookie capture script
+    const loginAndCookieCaptureScript = `
+      (function() {
+        console.log('Login and cookie capture script initialized');
+        
+        // Function to capture all cookies
+        function captureCookies() {
+          const cookies = document.cookie.split(';').reduce((acc, cookie) => {
+            const [key, value] = cookie.trim().split('=');
+            acc[key] = value;
+            return acc;
+          }, {});
+          
+          console.log('Captured cookies:', cookies);
+          window.opener.postMessage({
+            type: 'COOKIES_CAPTURED',
+            cookies: cookies
+          }, '*');
+        }
+
+        // Function to check if we're on the MFA screen
+        function isOnMfaScreen() {
+          const mfaField = document.querySelector('input[type="text"][name*="code"], input[type="text"][name*="mfa"], input[type="text"][name*="totp"]');
+          return !!mfaField;
+        }
+
+        // Function to check if we're on the login screen
+        function isOnLoginScreen() {
+          const usernameField = document.querySelector('input[type="text"], input[type="email"]');
+          const passwordField = document.querySelector('input[type="password"]');
+          return !!(usernameField && passwordField);
+        }
+
+        // Function to handle MFA verification
+        function handleMfaVerification() {
+          const mfaField = document.querySelector('input[type="text"][name*="code"], input[type="text"][name*="mfa"], input[type="text"][name*="totp"]');
+          if (mfaField) {
+            console.log('Found MFA field, filling in code');
+            mfaField.value = '${currentTotpCode}';
+            mfaField.dispatchEvent(new Event('input', { bubbles: true }));
+            
+            // Find and click the MFA submit button
+            const mfaSubmitButton = document.querySelector('button[type="submit"], input[type="submit"]');
+            if (mfaSubmitButton) {
+              mfaSubmitButton.click();
+            }
+            
+            // Wait for login to complete and capture cookies
+            setTimeout(() => {
+              console.log('MFA verification completed, capturing cookies...');
+              captureCookies();
+            }, 3000);
+          }
+        }
+
+        // Function to handle login with credentials
+        function handleLoginWithCredentials() {
+          const usernameField = document.querySelector('input[type="text"], input[type="email"]');
+          const passwordField = document.querySelector('input[type="password"]');
+          const loginButton = document.querySelector('button[type="submit"], input[type="submit"]');
+          
+          if (usernameField && passwordField && loginButton) {
+            console.log('Found login form elements');
+            
+            // Fill in credentials
+            usernameField.value = '${config.username}';
+            passwordField.value = '${config.password}';
+            
+            // Trigger input events
+            usernameField.dispatchEvent(new Event('input', { bubbles: true }));
+            passwordField.dispatchEvent(new Event('input', { bubbles: true }));
+            
+            // Submit the form
+            loginButton.click();
+            
+            // Wait for MFA page to load
+            setTimeout(() => {
+              handleMfaVerification();
+            }, 2000);
+          } else {
+            console.error('Could not find login form elements');
+            window.opener.postMessage({
+              type: 'LOGIN_ERROR',
+              error: 'Could not find login form elements'
+            }, '*');
+          }
+        }
+
+        // Main automation function
+        function automateLogin() {
+          console.log('Checking current page state...');
+          
+          if (isOnMfaScreen()) {
+            console.log('Already on MFA screen, proceeding with verification');
+            handleMfaVerification();
+          } else if (isOnLoginScreen()) {
+            console.log('On login screen, proceeding with credentials');
+            handleLoginWithCredentials();
+          } else {
+            console.error('Could not determine current page state');
+            window.opener.postMessage({
+              type: 'LOGIN_ERROR',
+              error: 'Could not determine current page state'
+            }, '*');
+          }
+        }
+
+        // Wait for the page to load
+        if (document.readyState === 'complete') {
+          automateLogin();
+        } else {
+          window.addEventListener('load', automateLogin);
+        }
+
+        // Also capture cookies when the user logs in manually
+        const loginForm = document.querySelector('form');
+        if (loginForm) {
+          loginForm.addEventListener('submit', () => {
+            setTimeout(captureCookies, 2000);
+          });
+        }
+      })();
+    `;
+
+    // Wait for the window to load before injecting the script
+    if (newWindow.document.readyState === 'complete') {
+      injectCookieCaptureScript(newWindow, loginAndCookieCaptureScript);
+    } else {
+      newWindow.addEventListener('load', () => {
+        injectCookieCaptureScript(newWindow, loginAndCookieCaptureScript);
+      });
+    }
+  };
+
+  const injectCookieCaptureScript = (targetWindow: Window, script: string) => {
+    try {
+      const scriptElement = targetWindow.document.createElement('script');
+      scriptElement.textContent = script;
+      targetWindow.document.head.appendChild(scriptElement);
+      targetWindow.document.head.removeChild(scriptElement);
+      console.log('Cookie capture script injected successfully');
+    } catch (error) {
+      console.error('Error injecting cookie capture script:', error);
+      enqueueSnackbar('Error setting up cookie capture', { variant: 'error' });
+      setIsCapturingCookies(false);
+    }
+  };
+
+  const stopCookieCapture = () => {
+    setIsCapturingCookies(false);
+    if (cookieCaptureWindow) {
+      cookieCaptureWindow.close();
+      setCookieCaptureWindow(null);
+    }
+    if ((window as any).cookieMessageHandler) {
+      window.removeEventListener('message', (window as any).cookieMessageHandler);
+      delete (window as any).cookieMessageHandler;
+    }
+  };
+
+  useEffect(() => {
+    return () => {
+      if (cookieCaptureWindow) {
+        cookieCaptureWindow.close();
+      }
+      if ((window as any).cookieMessageHandler) {
+        window.removeEventListener('message', (window as any).cookieMessageHandler);
+        delete (window as any).cookieMessageHandler;
+      }
+    };
+  }, [cookieCaptureWindow]);
+
+  return (
+    <Box sx={{ p: 2 }}>
+      <Typography variant="h6" gutterBottom>
+        Login and Cookie Capture Configuration
+      </Typography>
+      
+      <TextField
+        fullWidth
+        label="Login URL"
+        value={config.loginUrl || ''}
+        onChange={(e) => onConfigChange({ ...config, loginUrl: e.target.value })}
+        margin="normal"
+        helperText="Enter the URL of the login page"
+      />
+
+      <TextField
+        fullWidth
+        label="Username"
+        value={config.username || ''}
+        onChange={(e) => onConfigChange({ ...config, username: e.target.value })}
+        margin="normal"
+      />
+
+      <TextField
+        fullWidth
+        label="Password"
+        type="password"
+        value={config.password || ''}
+        onChange={(e) => onConfigChange({ ...config, password: e.target.value })}
+        margin="normal"
+      />
+
+      <TextField
+        fullWidth
+        label="TOTP Secret"
+        type={showTotpSecret ? "text" : "password"}
+        value={totpSecret}
+        onChange={(e) => setTotpSecret(e.target.value)}
+        margin="normal"
+        helperText="Enter your TOTP secret key"
+        InputProps={{
+          endAdornment: (
+            <InputAdornment position="end">
+              <IconButton
+                onClick={() => setShowTotpSecret(!showTotpSecret)}
+                edge="end"
+              >
+                {showTotpSecret ? <VisibilityOffIcon /> : <VisibilityIcon />}
+              </IconButton>
+            </InputAdornment>
+          ),
+        }}
+      />
+
+      {currentTotpCode && (
+        <Box sx={{ mt: 2, mb: 2 }}>
+          <Typography variant="subtitle1">Current TOTP Code:</Typography>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+            <Typography variant="h6" sx={{ fontFamily: 'monospace' }}>
+              {showTotpCode ? currentTotpCode : '••••••'}
+            </Typography>
+            <IconButton
+              onClick={() => setShowTotpCode(!showTotpCode)}
+              size="small"
+            >
+              {showTotpCode ? <VisibilityOffIcon /> : <VisibilityIcon />}
+            </IconButton>
+          </Box>
+          <Typography variant="caption" color="text.secondary">
+            Code updates every 30 seconds
+          </Typography>
+        </Box>
+      )}
+
+      <Box sx={{ mt: 2, display: 'flex', gap: 2 }}>
+        <Button
+          variant="contained"
+          color="primary"
+          onClick={startCookieCapture}
+          disabled={isCapturingCookies || !config.loginUrl || !config.username || !config.password || !totpSecret}
+        >
+          {isCapturingCookies ? 'Logging in and Capturing Cookies...' : 'Start Login and Cookie Capture'}
+        </Button>
+        
+        {isCapturingCookies && (
+          <Button
+            variant="outlined"
+            color="error"
+            onClick={stopCookieCapture}
+          >
+            Stop Capture
+          </Button>
+        )}
+      </Box>
+
+      {config.capturedCookies && Object.keys(config.capturedCookies).length > 0 && (
+        <Box sx={{ mt: 3 }}>
+          <Typography variant="subtitle1" gutterBottom>
+            Captured Cookies:
+          </Typography>
+          <TableContainer component={Paper}>
+            <Table size="small">
+              <TableHead>
+                <TableRow>
+                  <TableCell>Cookie Name</TableCell>
+                  <TableCell>Value</TableCell>
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {Object.entries(config.capturedCookies).map(([name, value]) => (
+                  <TableRow key={name}>
+                    <TableCell>{name}</TableCell>
+                    <TableCell>{value}</TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </TableContainer>
+        </Box>
+      )}
+    </Box>
+  );
+};
+
 function ApiRequestsPanel() {
   const { enqueueSnackbar } = useSnackbar();
   const [apiRequests, setApiRequests] = useState<ApiRequest[]>([]);
@@ -117,6 +539,14 @@ function ApiRequestsPanel() {
   const [requestToDelete, setRequestToDelete] = useState<string>('');
   const [environments, setEnvironments] = useState<Environment[]>([]);
   const [selectedEnvironment, setSelectedEnvironment] = useState<string>('');
+  const [isRecording, setIsRecording] = useState(false);
+  const [recordedRequests, setRecordedRequests] = useState<NetworkRequest[]>([]);
+  const [showRecordedRequests, setShowRecordedRequests] = useState(false);
+  const [recordingWindow, setRecordingWindow] = useState<Window | null>(null);
+  const [recordingUrl, setRecordingUrl] = useState('');
+  const [isCapturingCookies, setIsCapturingCookies] = useState(false);
+  const [cookieCaptureWindow, setCookieCaptureWindow] = useState<Window | null>(null);
+  const [activeTab, setActiveTab] = useState(0);
 
   // Load saved data on mount
   useEffect(() => {
@@ -576,6 +1006,303 @@ function ApiRequestsPanel() {
     localStorage.setItem(STORAGE_KEYS.SELECTED_ENVIRONMENT, newEnvironment);
   };
 
+  // Function to start recording network requests
+  const startRecording = () => {
+    console.log('Starting network recording...');
+    const url = prompt('Enter URL to record traffic from:');
+    if (!url) {
+      console.log('No URL provided, stopping recording');
+      enqueueSnackbar('Please enter a valid URL', { variant: 'error' });
+      return;
+    }
+    console.log('Recording URL:', url);
+
+    setRecordingUrl(url);
+    setIsRecording(true);
+    setRecordedRequests([]);
+
+    // Create a new window instead of an iframe
+    const newWindow = window.open(url, '_blank', 'width=1200,height=800');
+    if (!newWindow) {
+      console.error('Failed to open new window');
+      enqueueSnackbar('Failed to open new window. Please allow popups.', { variant: 'error' });
+      setIsRecording(false);
+      return;
+    }
+    console.log('New window opened successfully');
+
+    setRecordingWindow(newWindow);
+    enqueueSnackbar('Network recording started', { variant: 'info' });
+
+    const messageHandler = (event: MessageEvent) => {
+      console.log('Received message event:', event);
+      if (event.data && event.data.type === 'NETWORK_REQUEST') {
+        console.log('Processing network request:', event.data.request);
+        const request = event.data.request;
+        setRecordedRequests(prev => {
+          const isDuplicate = prev.some(r => 
+            r.method === request.method && 
+            r.endpoint === request.endpoint && 
+            r.timestamp === request.timestamp
+          );
+          
+          if (!isDuplicate) {
+            console.log('Adding new request to recorded requests');
+            return [...prev, request];
+          }
+          console.log('Duplicate request detected, skipping');
+          return prev;
+        });
+      } else {
+        console.log('Received non-network request message:', event.data);
+      }
+    };
+
+    window.addEventListener('message', messageHandler);
+    (window as any).messageHandler = messageHandler;
+    console.log('Message handler added');
+
+    const interceptorScript = `
+      (function() {
+        console.log('Network interceptor script initialized');
+        
+        // Store original fetch
+        const originalFetch = window.fetch;
+        
+        // Override fetch
+        window.fetch = async function(input, init) {
+          console.log('Intercepted fetch request:', { input, init });
+          const startTime = Date.now();
+          
+          try {
+            const response = await originalFetch(input, init);
+            const responseClone = response.clone();
+            const url = typeof input === 'string' ? input : (input instanceof URL ? input.toString() : input.url);
+            const method = init?.method || 'GET';
+            const headers = init?.headers ? Object.entries(init.headers).map(([key, value]) => ({
+              key,
+              value: String(value)
+            })) : [];
+            const body = init?.body ? String(init.body) : '{}';
+            const status = response.status;
+            const responseBody = await responseClone.text();
+
+            console.log('Captured fetch request details:', {
+              url,
+              method,
+              headers,
+              body,
+              status,
+              responseBody
+            });
+
+            // Send request details to parent window
+            try {
+              window.opener.postMessage({
+                type: 'NETWORK_REQUEST',
+                request: {
+                  id: Date.now().toString(),
+                  name: \`\${method} \${url}\`,
+                  method,
+                  endpoint: url,
+                  headers,
+                  body,
+                  response: responseBody,
+                  status,
+                  timestamp: startTime
+                }
+              }, '*');
+              console.log('Successfully sent fetch request to parent window');
+            } catch (error) {
+              console.error('Error sending fetch request to parent window:', error);
+            }
+          } catch (error) {
+            console.error('Error in fetch interceptor:', error);
+          }
+
+          return response;
+        };
+
+        // Store original XHR
+        const originalXHR = window.XMLHttpRequest;
+        
+        // Override XHR
+        window.XMLHttpRequest = function() {
+          console.log('Intercepted XHR request');
+          const xhr = new originalXHR();
+          const originalOpen = xhr.open;
+          const originalSend = xhr.send;
+          const originalSetRequestHeader = xhr.setRequestHeader;
+          let requestHeaders = [];
+          let requestBody = null;
+
+          xhr.setRequestHeader = function(header, value) {
+            console.log('XHR request header set:', { header, value });
+            requestHeaders.push({ key: header, value: String(value) });
+            return originalSetRequestHeader.apply(this, arguments);
+          };
+
+          xhr.open = function(method, url) {
+            console.log('XHR request opened:', { method, url });
+            this._url = url;
+            this._method = method;
+            return originalOpen.apply(this, arguments);
+          };
+
+          xhr.send = function(data) {
+            console.log('XHR request sent:', { data });
+            const startTime = Date.now();
+            requestBody = data;
+            const originalOnReadyStateChange = this.onreadystatechange;
+
+            this.onreadystatechange = function() {
+              if (this.readyState === 4) {
+                console.log('XHR request completed:', {
+                  method: this._method,
+                  url: this._url,
+                  status: this.status,
+                  response: this.responseText
+                });
+                try {
+                  window.opener.postMessage({
+                    type: 'NETWORK_REQUEST',
+                    request: {
+                      id: Date.now().toString(),
+                      name: \`\${this._method} \${this._url}\`,
+                      method: this._method,
+                      endpoint: this._url,
+                      headers: requestHeaders,
+                      body: requestBody || '{}',
+                      response: this.responseText,
+                      status: this.status,
+                      timestamp: startTime
+                    }
+                  }, '*');
+                  console.log('Successfully sent XHR request to parent window');
+                } catch (error) {
+                  console.error('Error sending XHR request to parent window:', error);
+                }
+              }
+              if (originalOnReadyStateChange) {
+                originalOnReadyStateChange.apply(this, arguments);
+              }
+            };
+
+            return originalSend.apply(this, arguments);
+          };
+
+          return xhr;
+        };
+
+        // Test the interceptor
+        console.log('Testing fetch interceptor...');
+        fetch('https://reqres.in/api/users?page=1')
+          .then(response => response.json())
+          .then(data => console.log('Test fetch request completed:', data))
+          .catch(error => console.error('Test fetch request failed:', error));
+
+        console.log('Network interceptor setup complete');
+      })();
+    `;
+
+    const injectScript = () => {
+      try {
+        // Create a script element
+        const scriptElement = newWindow.document.createElement('script');
+        scriptElement.textContent = interceptorScript;
+        
+        // Add the script to the document
+        newWindow.document.head.appendChild(scriptElement);
+        
+        // Remove the script element after injection
+        newWindow.document.head.removeChild(scriptElement);
+        
+        console.log('Interceptor script injected successfully');
+        enqueueSnackbar('Network interceptor initialized', { variant: 'success' });
+      } catch (error) {
+        console.error('Error injecting interceptor script:', error);
+        enqueueSnackbar('Error setting up network recording', { variant: 'error' });
+        stopRecording();
+      }
+    };
+
+    // Wait for the window to load
+    if (newWindow.document.readyState === 'complete') {
+      console.log('Window already loaded, injecting interceptor script');
+      injectScript();
+    } else {
+      newWindow.addEventListener('load', () => {
+        console.log('Window loaded, injecting interceptor script');
+        injectScript();
+      });
+    }
+  };
+
+  const stopRecording = () => {
+    console.log('Stopping network recording...');
+    setIsRecording(false);
+    
+    if ((window as any).messageHandler) {
+      console.log('Removing message handler');
+      window.removeEventListener('message', (window as any).messageHandler);
+      delete (window as any).messageHandler;
+    }
+
+    if (recordingWindow) {
+      console.log('Closing recording window');
+      setTimeout(() => {
+        recordingWindow.close();
+        setRecordingWindow(null);
+      }, 1000);
+    }
+
+    setShowRecordedRequests(true);
+    console.log('Network recording stopped');
+    enqueueSnackbar('Network recording stopped', { variant: 'info' });
+  };
+
+  useEffect(() => {
+    return () => {
+      console.log('Cleaning up network recording...');
+      if (recordingWindow) {
+        recordingWindow.close();
+      }
+      if ((window as any).messageHandler) {
+        window.removeEventListener('message', (window as any).messageHandler);
+        delete (window as any).messageHandler;
+      }
+    };
+  }, [recordingWindow]);
+
+  // Function to add recorded request to API requests
+  const addRecordedRequest = (request: NetworkRequest) => {
+    try {
+      const newApiRequest: ApiRequest = {
+        id: Date.now().toString(),
+        name: `${request.method} ${request.endpoint}`,
+        method: request.method,
+        endpoint: request.endpoint,
+        headers: request.headers,
+        body: request.body,
+        expectedStatus: request.status,
+        assertions: [],
+        suite: 'recorded',
+        environment: selectedEnvironment
+      };
+
+      setApiRequests(prev => {
+        const updatedRequests = [...prev, newApiRequest];
+        localStorage.setItem(STORAGE_KEYS.API_REQUESTS, JSON.stringify(updatedRequests));
+        return updatedRequests;
+      });
+
+      enqueueSnackbar('Recorded request added successfully', { variant: 'success' });
+    } catch (error) {
+      console.error('Error adding recorded request:', error);
+      enqueueSnackbar('Error adding recorded request', { variant: 'error' });
+    }
+  };
+
   return (
     <Box sx={{ p: 3 }}>
       <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
@@ -627,6 +1354,14 @@ function ApiRequestsPanel() {
           >
             Add Request
           </Button>
+          <Button
+            variant="outlined"
+            color={isRecording ? "error" : "primary"}
+            onClick={isRecording ? stopRecording : startRecording}
+            startIcon={isRecording ? <StopIcon /> : <PlayArrowIcon />}
+          >
+            {isRecording ? 'Stop Recording' : 'Start Recording'}
+          </Button>
         </Box>
       </Box>
 
@@ -634,170 +1369,188 @@ function ApiRequestsPanel() {
         <Grid item xs={12}>
           <Card>
             <CardContent>
-              <DragDropContext onDragEnd={handleDragEnd}>
-                <Droppable droppableId="api-requests">
-                  {(provided) => (
-                    <TableContainer 
-                      component={Paper} 
-                      variant="outlined"
-                      {...provided.droppableProps}
-                      ref={provided.innerRef}
-                    >
-                      <Table size="small">
-                        <TableHead>
-                          <TableRow>
-                            <TableCell width="40px"></TableCell>
-                            <TableCell>Name</TableCell>
-                            <TableCell>Method</TableCell>
-                            <TableCell>Endpoint</TableCell>
-                            <TableCell>Suite</TableCell>
-                            <TableCell>Status</TableCell>
-                            <TableCell>Assertions</TableCell>
-                            <TableCell>Actions</TableCell>
-                          </TableRow>
-                        </TableHead>
-                        <TableBody>
-                          {(apiRequests || []).map((request, index) => (
-                            <Draggable
-                              key={request.id || `request-${index}`}
-                              draggableId={request.id || `request-${index}`}
-                              index={index}
-                            >
-                              {(provided) => (
-                                <React.Fragment>
-                                  <TableRow
-                                    ref={provided.innerRef}
-                                    {...provided.draggableProps}
-                                    {...provided.dragHandleProps}
-                                  >
-                                    <TableCell {...provided.dragHandleProps} sx={{ cursor: 'move', width: '40px' }}>
-                                      <DragIndicatorIcon fontSize="small" />
-                                    </TableCell>
-                                    <TableCell>{request.name}</TableCell>
-                                    <TableCell>{request.method}</TableCell>
-                                    <TableCell>{request.endpoint}</TableCell>
-                                    <TableCell>
-                                      <Chip 
-                                        label={request.suite} 
-                                        sx={{ 
-                                          backgroundColor: getSuiteColor(request.suite).background,
-                                          color: getSuiteColor(request.suite).text,
-                                          '&:hover': {
-                                            backgroundColor: getSuiteColor(request.suite).background,
-                                            opacity: 0.8
-                                          }
-                                        }}
-                                        size="small"
-                                      />
-                                    </TableCell>
-                                    <TableCell>{request.expectedStatus}</TableCell>
-                                    <TableCell>
-                                      <Chip 
-                                        label={`${request.assertions.length} assertions`}
-                                        size="small"
-                                        color="primary"
-                                        variant="outlined"
-                                      />
-                                    </TableCell>
-                                    <TableCell>
-                                      <Box sx={{ display: 'flex', gap: 1 }}>
-                                        <Tooltip title="Edit">
-                                          <IconButton
+              <Tabs value={activeTab} onChange={(_, newValue) => setActiveTab(newValue)}>
+                <Tab label="API Requests" />
+                <Tab label="Configuration" />
+              </Tabs>
+
+              {activeTab === 0 && (
+                <Box sx={{ mt: 2 }}>
+                  <DragDropContext onDragEnd={handleDragEnd}>
+                    <Droppable droppableId="api-requests">
+                      {(provided) => (
+                        <TableContainer 
+                          component={Paper} 
+                          variant="outlined"
+                          {...provided.droppableProps}
+                          ref={provided.innerRef}
+                        >
+                          <Table size="small">
+                            <TableHead>
+                              <TableRow>
+                                <TableCell width="40px"></TableCell>
+                                <TableCell>Name</TableCell>
+                                <TableCell>Method</TableCell>
+                                <TableCell>Endpoint</TableCell>
+                                <TableCell>Suite</TableCell>
+                                <TableCell>Status</TableCell>
+                                <TableCell>Assertions</TableCell>
+                                <TableCell>Actions</TableCell>
+                              </TableRow>
+                            </TableHead>
+                            <TableBody>
+                              {(apiRequests || []).map((request, index) => (
+                                <Draggable
+                                  key={request.id || `request-${index}`}
+                                  draggableId={request.id || `request-${index}`}
+                                  index={index}
+                                >
+                                  {(provided) => (
+                                    <React.Fragment>
+                                      <TableRow
+                                        ref={provided.innerRef}
+                                        {...provided.draggableProps}
+                                        {...provided.dragHandleProps}
+                                      >
+                                        <TableCell {...provided.dragHandleProps} sx={{ cursor: 'move', width: '40px' }}>
+                                          <DragIndicatorIcon fontSize="small" />
+                                        </TableCell>
+                                        <TableCell>{request.name}</TableCell>
+                                        <TableCell>{request.method}</TableCell>
+                                        <TableCell>{request.endpoint}</TableCell>
+                                        <TableCell>
+                                          <Chip 
+                                            label={request.suite} 
+                                            sx={{ 
+                                              backgroundColor: getSuiteColor(request.suite).background,
+                                              color: getSuiteColor(request.suite).text,
+                                              '&:hover': {
+                                                backgroundColor: getSuiteColor(request.suite).background,
+                                                opacity: 0.8
+                                              }
+                                            }}
+                                            size="small"
+                                          />
+                                        </TableCell>
+                                        <TableCell>{request.expectedStatus}</TableCell>
+                                        <TableCell>
+                                          <Chip 
+                                            label={`${request.assertions.length} assertions`}
                                             size="small"
                                             color="primary"
-                                            onClick={() => handleApiRequestEdit(request)}
-                                          >
-                                            <EditIcon fontSize="small" />
-                                          </IconButton>
-                                        </Tooltip>
-                                        <Tooltip title="Copy">
-                                          <IconButton
-                                            size="small"
-                                            onClick={() => handleCopyRequest(request)}
-                                          >
-                                            <ContentCopyIcon fontSize="small" />
-                                          </IconButton>
-                                        </Tooltip>
-                                        <Tooltip title="Delete">
-                                          <IconButton
-                                            size="small"
-                                            onClick={() => handleDeleteRequest(request.id)}
-                                            color="error"
-                                          >
-                                            <DeleteIcon fontSize="small" />
-                                          </IconButton>
-                                        </Tooltip>
-                                      </Box>
-                                    </TableCell>
-                                  </TableRow>
-                                  <TableRow>
-                                    <TableCell style={{ paddingBottom: 0, paddingTop: 0 }} colSpan={8}>
-                                      <Collapse in={expanded[index] ?? false} timeout="auto" unmountOnExit>
-                                        <Box sx={{ margin: 1 }}>
-                                          <Grid container spacing={2}>
-                                            <Grid item xs={12}>
-                                              <Typography variant="subtitle2" gutterBottom>
-                                                Assertions
-                                              </Typography>
-                                              {request.assertions.map((assertion, assertionIndex) => (
-                                                <Box key={assertion.id} sx={{ mb: 2, p: 2, border: '1px solid', borderColor: 'divider', borderRadius: 1 }}>
-                                                  <Grid container spacing={2}>
-                                                    <Grid item xs={12} sm={3}>
-                                                      <Typography variant="body2" color="text.secondary">
-                                                        Type: {assertion.type}
-                                                      </Typography>
-                                                    </Grid>
-                                                    {assertion.type !== 'status' && (
-                                                      <Grid item xs={12} sm={3}>
-                                                        <Typography variant="body2" color="text.secondary">
-                                                          Path: {assertion.path}
-                                                        </Typography>
-                                                      </Grid>
-                                                    )}
-                                                    <Grid item xs={12} sm={3}>
-                                                      <Typography variant="body2" color="text.secondary">
-                                                        Operator: {assertion.operator}
-                                                      </Typography>
-                                                    </Grid>
-                                                    {assertion.operator !== 'keyValue' && (
-                                                      <Grid item xs={12} sm={3}>
-                                                        <Typography variant="body2" color="text.secondary">
-                                                          Value: {assertion.value}
-                                                        </Typography>
-                                                      </Grid>
-                                                    )}
-                                                    {assertion.operator === 'keyValue' && (
-                                                      <Grid item xs={12}>
-                                                        <Typography variant="body2" color="text.secondary">
-                                                          Key-Value Pairs:
-                                                        </Typography>
-                                                        {(assertion.keyValuePairs ?? []).map((pair, pairIndex) => (
-                                                          <Typography key={pairIndex} variant="body2" color="text.secondary">
-                                                            {pair.key}: {pair.value}
+                                            variant="outlined"
+                                          />
+                                        </TableCell>
+                                        <TableCell>
+                                          <Box sx={{ display: 'flex', gap: 1 }}>
+                                            <Tooltip title="Edit">
+                                              <IconButton
+                                                size="small"
+                                                color="primary"
+                                                onClick={() => handleApiRequestEdit(request)}
+                                              >
+                                                <EditIcon fontSize="small" />
+                                              </IconButton>
+                                            </Tooltip>
+                                            <Tooltip title="Copy">
+                                              <IconButton
+                                                size="small"
+                                                onClick={() => handleCopyRequest(request)}
+                                              >
+                                                <ContentCopyIcon fontSize="small" />
+                                              </IconButton>
+                                            </Tooltip>
+                                            <Tooltip title="Delete">
+                                              <IconButton
+                                                size="small"
+                                                onClick={() => handleDeleteRequest(request.id)}
+                                                color="error"
+                                              >
+                                                <DeleteIcon fontSize="small" />
+                                              </IconButton>
+                                            </Tooltip>
+                                          </Box>
+                                        </TableCell>
+                                      </TableRow>
+                                      <TableRow>
+                                        <TableCell style={{ paddingBottom: 0, paddingTop: 0 }} colSpan={8}>
+                                          <Collapse in={expanded[index] ?? false} timeout="auto" unmountOnExit>
+                                            <Box sx={{ margin: 1 }}>
+                                              <Grid container spacing={2}>
+                                                <Grid item xs={12}>
+                                                  <Typography variant="subtitle2" gutterBottom>
+                                                    Assertions
+                                                  </Typography>
+                                                  {request.assertions.map((assertion, assertionIndex) => (
+                                                    <Box key={assertion.id} sx={{ mb: 2, p: 2, border: '1px solid', borderColor: 'divider', borderRadius: 1 }}>
+                                                      <Grid container spacing={2}>
+                                                        <Grid item xs={12} sm={3}>
+                                                          <Typography variant="body2" color="text.secondary">
+                                                            Type: {assertion.type}
                                                           </Typography>
-                                                        ))}
+                                                        </Grid>
+                                                        {assertion.type !== 'status' && (
+                                                          <Grid item xs={12} sm={3}>
+                                                            <Typography variant="body2" color="text.secondary">
+                                                              Path: {assertion.path}
+                                                            </Typography>
+                                                          </Grid>
+                                                        )}
+                                                        <Grid item xs={12} sm={3}>
+                                                          <Typography variant="body2" color="text.secondary">
+                                                            Operator: {assertion.operator}
+                                                          </Typography>
+                                                        </Grid>
+                                                        {assertion.operator !== 'keyValue' && (
+                                                          <Grid item xs={12} sm={3}>
+                                                            <Typography variant="body2" color="text.secondary">
+                                                              Value: {assertion.value}
+                                                            </Typography>
+                                                          </Grid>
+                                                        )}
+                                                        {assertion.operator === 'keyValue' && (
+                                                          <Grid item xs={12}>
+                                                            <Typography variant="body2" color="text.secondary">
+                                                              Key-Value Pairs:
+                                                            </Typography>
+                                                            {(assertion.keyValuePairs ?? []).map((pair, pairIndex) => (
+                                                              <Typography key={pairIndex} variant="body2" color="text.secondary">
+                                                                {pair.key}: {pair.value}
+                                                              </Typography>
+                                                            ))}
+                                                          </Grid>
+                                                        )}
                                                       </Grid>
-                                                    )}
-                                                  </Grid>
-                                                </Box>
-                                              ))}
-                                            </Grid>
-                                          </Grid>
-                                        </Box>
-                                      </Collapse>
-                                    </TableCell>
-                                  </TableRow>
-                                </React.Fragment>
-                              )}
-                            </Draggable>
-                          ))}
-                          {provided.placeholder}
-                        </TableBody>
-                      </Table>
-                    </TableContainer>
-                  )}
-                </Droppable>
-              </DragDropContext>
+                                                    </Box>
+                                                  ))}
+                                                </Grid>
+                                              </Grid>
+                                            </Box>
+                                          </Collapse>
+                                        </TableCell>
+                                      </TableRow>
+                                    </React.Fragment>
+                                  )}
+                                </Draggable>
+                              ))}
+                              {provided.placeholder}
+                            </TableBody>
+                          </Table>
+                        </TableContainer>
+                      )}
+                    </Droppable>
+                  </DragDropContext>
+                </Box>
+              )}
+
+              {activeTab === 1 && (
+                <Box sx={{ mt: 2 }}>
+                  <ConfigurationTab 
+                    config={currentApiRequest} 
+                    onConfigChange={setCurrentApiRequest} 
+                  />
+                </Box>
+              )}
             </CardContent>
           </Card>
         </Grid>
@@ -1096,6 +1849,54 @@ function ApiRequestsPanel() {
           <Button onClick={confirmDelete} color="error" variant="contained">
             Delete
           </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Recorded Requests Dialog */}
+      <Dialog
+        open={showRecordedRequests}
+        onClose={() => setShowRecordedRequests(false)}
+        maxWidth="md"
+        fullWidth
+      >
+        <DialogTitle>Recorded Network Requests</DialogTitle>
+        <DialogContent>
+          <TableContainer component={Paper}>
+            <Table>
+              <TableHead>
+                <TableRow>
+                  <TableCell>Method</TableCell>
+                  <TableCell>Endpoint</TableCell>
+                  <TableCell>Status</TableCell>
+                  <TableCell>Actions</TableCell>
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {recordedRequests.map((request) => (
+                  <TableRow key={request.id}>
+                    <TableCell>{request.method}</TableCell>
+                    <TableCell>{request.endpoint}</TableCell>
+                    <TableCell>{request.status}</TableCell>
+                    <TableCell>
+                      <Button
+                        variant="outlined"
+                        size="small"
+                        onClick={() => {
+                          addRecordedRequest(request);
+                          setShowRecordedRequests(false);
+                        }}
+                      >
+                        Add to API Requests
+                      </Button>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </TableContainer>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setShowRecordedRequests(false)}>Close</Button>
         </DialogActions>
       </Dialog>
     </Box>
