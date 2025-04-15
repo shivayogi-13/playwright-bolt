@@ -204,8 +204,11 @@ const ConfigurationTab: React.FC<ConfigurationTabProps> = ({ config, onConfigCha
   useEffect(() => {
     const loadSavedCookies = async () => {
       try {
-        const cookies = await chrome.cookies.getAll({});
-        setCapturedCookies(cookies);
+        // Load cookies from localStorage instead of chrome.cookies
+        const savedCookies = localStorage.getItem('capturedCookies');
+        if (savedCookies) {
+          setCapturedCookies(JSON.parse(savedCookies));
+        }
       } catch (error) {
         console.error('Error loading cookies:', error);
       }
@@ -217,12 +220,12 @@ const ConfigurationTab: React.FC<ConfigurationTabProps> = ({ config, onConfigCha
   useEffect(() => {
     const loadStoredCookies = async () => {
       try {
-        const cookies = await chrome.cookies.getAll({});
-        const cookieMap: { [key: string]: string } = {};
-        cookies.forEach(cookie => {
-          cookieMap[cookie.name] = cookie.value;
-        });
-        setStoredCookies(cookieMap);
+        // Load stored cookies from localStorage
+        const savedStoredCookies = localStorage.getItem('storedCookies');
+        if (savedStoredCookies) {
+          const parsedCookies = JSON.parse(savedStoredCookies);
+          setStoredCookies(parsedCookies);
+        }
       } catch (error) {
         console.error('Error loading stored cookies:', error);
       }
@@ -272,6 +275,11 @@ const ConfigurationTab: React.FC<ConfigurationTabProps> = ({ config, onConfigCha
       return;
     }
 
+    if (!mfaConfig.otpInputXPath || !mfaConfig.verifyButtonXPath) {
+      enqueueSnackbar('Please provide XPath for OTP input and verify button', { variant: 'error' });
+      return;
+    }
+
     const newWindow = window.open(loginUrl, '_blank');
     if (!newWindow) {
       enqueueSnackbar('Could not open login window. Please allow popups.', { variant: 'error' });
@@ -286,16 +294,36 @@ const ConfigurationTab: React.FC<ConfigurationTabProps> = ({ config, onConfigCha
       // Inject cookie capture script
       const script = `
         (function() {
-          // Function to capture cookies
+          // Function to capture cookies from document.cookie and localStorage
           function captureCookies() {
             try {
-              const cookies = document.cookie.split(';').map(cookie => {
+              // Get cookies from document.cookie
+              const documentCookies = document.cookie.split(';').map(cookie => {
                 const [name, value] = cookie.trim().split('=');
-                return { name, value };
+                return { name, value, source: 'document.cookie' };
               });
+
+              // Get cookies from localStorage
+              const localStorageCookies = Object.entries(localStorage).map(([name, value]) => ({
+                name,
+                value,
+                source: 'localStorage'
+              }));
+
+              // Get cookies from sessionStorage
+              const sessionStorageCookies = Object.entries(sessionStorage).map(([name, value]) => ({
+                name,
+                value,
+                source: 'sessionStorage'
+              }));
+
+              // Combine all cookies
+              const allCookies = [...documentCookies, ...localStorageCookies, ...sessionStorageCookies];
+
+              // Send cookies to parent window
               window.opener.postMessage({
                 type: 'COOKIES_CAPTURED',
-                cookies: cookies
+                cookies: allCookies
               }, '*');
             } catch (error) {
               console.error('Error capturing cookies:', error);
@@ -310,6 +338,20 @@ const ConfigurationTab: React.FC<ConfigurationTabProps> = ({ config, onConfigCha
 
           // Capture cookies before window unload
           window.addEventListener('beforeunload', captureCookies);
+
+          // Add event listener for cookie changes
+          document.addEventListener('DOMContentLoaded', captureCookies);
+          window.addEventListener('load', captureCookies);
+
+          // Add MutationObserver to detect DOM changes
+          const observer = new MutationObserver(() => {
+            captureCookies();
+          });
+
+          observer.observe(document.body, {
+            childList: true,
+            subtree: true
+          });
         })();
       `;
 
@@ -418,7 +460,8 @@ const ConfigurationTab: React.FC<ConfigurationTabProps> = ({ config, onConfigCha
     try {
       const script = `
         (function() {
-          setTimeout(() => {
+          // Function to check if we're on the MFA screen
+          function isOnMfaScreen() {
             const mfaField = document.evaluate(
               '${mfaConfig.otpInputXPath}',
               document,
@@ -426,44 +469,75 @@ const ConfigurationTab: React.FC<ConfigurationTabProps> = ({ config, onConfigCha
               XPathResult.FIRST_ORDERED_NODE_TYPE,
               null
             ).singleNodeValue;
-            
-            const verifyButton = document.evaluate(
-              '${mfaConfig.verifyButtonXPath}',
-              document,
-              null,
-              XPathResult.FIRST_ORDERED_NODE_TYPE,
-              null
-            ).singleNodeValue;
+            return !!mfaField;
+          }
 
-            if (mfaField && verifyButton) {
-              // Clear any existing value
-              mfaField.value = '';
-              // Trigger input event
-              mfaField.dispatchEvent(new Event('input', { bubbles: true }));
-              // Add delay before setting value
-              setTimeout(() => {
-                mfaField.value = '${mfaConfig.otpCode}';
+          // Function to handle MFA verification with delay
+          function handleMfaVerification() {
+            setTimeout(() => {
+              const mfaField = document.evaluate(
+                '${mfaConfig.otpInputXPath}',
+                document,
+                null,
+                XPathResult.FIRST_ORDERED_NODE_TYPE,
+                null
+              ).singleNodeValue;
+              
+              const verifyButton = document.evaluate(
+                '${mfaConfig.verifyButtonXPath}',
+                document,
+                null,
+                XPathResult.FIRST_ORDERED_NODE_TYPE,
+                null
+              ).singleNodeValue;
+
+              if (mfaField && verifyButton) {
+                // Clear any existing value
+                mfaField.value = '';
+                // Trigger input event
                 mfaField.dispatchEvent(new Event('input', { bubbles: true }));
-                mfaField.dispatchEvent(new Event('change', { bubbles: true }));
-                
-                // Add delay before clicking verify button
+                // Add delay before setting value
                 setTimeout(() => {
-                  verifyButton.click();
-                  // Capture cookies after verification
+                  // Set the TOTP code value
+                  mfaField.value = '${currentTotpCode}';
+                  mfaField.dispatchEvent(new Event('input', { bubbles: true }));
+                  mfaField.dispatchEvent(new Event('change', { bubbles: true }));
+                  
+                  // Add delay before clicking verify button
                   setTimeout(() => {
-                    const cookies = document.cookie.split(';').map(cookie => {
-                      const [name, value] = cookie.trim().split('=');
-                      return { name, value };
-                    });
-                    window.opener.postMessage({
-                      type: 'COOKIES_CAPTURED',
-                      cookies: cookies
-                    }, '*');
-                  }, 2000);
-                }, 1000);
-              }, 500);
-            }
-          }, 2000);
+                    verifyButton.click();
+                    // Capture cookies after verification
+                    setTimeout(() => {
+                      const cookies = document.cookie.split(';').map(cookie => {
+                        const [name, value] = cookie.trim().split('=');
+                        return { name, value };
+                      });
+                      window.opener.postMessage({
+                        type: 'COOKIES_CAPTURED',
+                        cookies: cookies
+                      }, '*');
+                    }, 2000);
+                  }, 1000);
+                }, 500);
+              }
+            }, 2000);
+          }
+
+          // Check for MFA screen
+          if (isOnMfaScreen()) {
+            window.opener.postMessage({ type: 'MFA_SCREEN_DETECTED' }, '*');
+            handleMfaVerification();
+          }
+
+          // Capture cookies when the page loads
+          const cookies = document.cookie.split(';').map(cookie => {
+            const [name, value] = cookie.trim().split('=');
+            return { name, value };
+          });
+          window.opener.postMessage({
+            type: 'COOKIES_CAPTURED',
+            cookies: cookies
+          }, '*');
         })();
       `;
 
@@ -480,41 +554,71 @@ const ConfigurationTab: React.FC<ConfigurationTabProps> = ({ config, onConfigCha
   const stopCookieCapture = () => {
     setIsCapturing(false);
     if (cookieWindow) {
-      // Capture cookies one last time before closing
-      const script = `
-        (function() {
-          try {
-            // Get all cookies
-            const cookies = document.cookie.split(';').map(cookie => {
-              const [name, value] = cookie.trim().split('=');
-              return { name, value };
-            });
-            
-            // Send cookies to parent window
-            window.opener.postMessage({
-              type: 'COOKIES_CAPTURED',
-              cookies: cookies
-            }, '*');
-            
-            // Wait a bit to ensure message is sent
-            setTimeout(() => {
-              window.close();
-            }, 500);
-          } catch (error) {
-            console.error('Error capturing final cookies:', error);
-            window.close();
-          }
-        })();
-      `;
-
       try {
-        const scriptElement = cookieWindow.document.createElement('script');
-        scriptElement.textContent = script;
-        cookieWindow.document.head.appendChild(scriptElement);
-        cookieWindow.document.head.removeChild(scriptElement);
+        // Check if the window is still accessible
+        if (!cookieWindow.closed) {
+          // Try to capture cookies one last time before closing
+          try {
+            const script = `
+              (function() {
+                try {
+                  // Get cookies from document.cookie
+                  const documentCookies = document.cookie.split(';').map(cookie => {
+                    const [name, value] = cookie.trim().split('=');
+                    return { name, value, source: 'document.cookie' };
+                  });
+
+                  // Get cookies from localStorage
+                  const localStorageCookies = Object.entries(localStorage).map(([name, value]) => ({
+                    name,
+                    value,
+                    source: 'localStorage'
+                  }));
+
+                  // Get cookies from sessionStorage
+                  const sessionStorageCookies = Object.entries(sessionStorage).map(([name, value]) => ({
+                    name,
+                    value,
+                    source: 'sessionStorage'
+                  }));
+
+                  // Combine all cookies
+                  const allCookies = [...documentCookies, ...localStorageCookies, ...sessionStorageCookies];
+
+                  // Send cookies to parent window
+                  window.opener.postMessage({
+                    type: 'COOKIES_CAPTURED',
+                    cookies: allCookies
+                  }, '*');
+                } catch (error) {
+                  console.error('Error capturing final cookies:', error);
+                } finally {
+                  // Always try to close the window
+                  window.close();
+                }
+              })();
+            `;
+
+            // Try to inject the script
+            try {
+              const scriptElement = cookieWindow.document.createElement('script');
+              scriptElement.textContent = script;
+              cookieWindow.document.head.appendChild(scriptElement);
+              cookieWindow.document.head.removeChild(scriptElement);
+            } catch (error) {
+              console.error('Error injecting final cookie capture script:', error);
+              // If script injection fails, just close the window
+              cookieWindow.close();
+            }
+          } catch (error) {
+            console.error('Error in final cookie capture:', error);
+            cookieWindow.close();
+          }
+        } else {
+          console.log('Window was already closed');
+        }
       } catch (error) {
-        console.error('Error injecting final cookie capture script:', error);
-        cookieWindow.close();
+        console.error('Error accessing window:', error);
       }
     }
     setCookieWindow(null);
@@ -526,9 +630,10 @@ const ConfigurationTab: React.FC<ConfigurationTabProps> = ({ config, onConfigCha
       if (event.data.type === 'MFA_SCREEN_DETECTED') {
         handleMFAVerification(cookieWindow!);
       } else if (event.data.type === 'COOKIES_CAPTURED') {
-        const newCookies = event.data.cookies.reduce((acc: { [key: string]: string }, cookie: { name: string; value: string }) => {
+        const newCookies = event.data.cookies.reduce((acc: { [key: string]: string }, cookie: { name: string; value: string; source: string }) => {
           if (cookie.name && cookie.value) {
-            acc[cookie.name] = cookie.value;
+            // Store the cookie with its source
+            acc[cookie.name] = `${cookie.value} (${cookie.source})`;
           }
           return acc;
         }, {});
@@ -540,17 +645,11 @@ const ConfigurationTab: React.FC<ConfigurationTabProps> = ({ config, onConfigCha
         }));
         
         // Save the updated cookies to localStorage
-        const updatedConfig = {
-          ...config,
-          capturedCookies: {
-            ...config.capturedCookies,
-            ...newCookies
-          }
-        };
-        
         try {
-          localStorage.setItem('apiRequestConfig', JSON.stringify(updatedConfig));
-          onConfigChange(updatedConfig);
+          localStorage.setItem('storedCookies', JSON.stringify({
+            ...storedCookies,
+            ...newCookies
+          }));
           enqueueSnackbar('Cookies captured successfully', { variant: 'success' });
         } catch (error) {
           console.error('Error saving cookies:', error);
@@ -561,7 +660,7 @@ const ConfigurationTab: React.FC<ConfigurationTabProps> = ({ config, onConfigCha
 
     window.addEventListener('message', handleMessage);
     return () => window.removeEventListener('message', handleMessage);
-  }, [config, cookieWindow, onConfigChange]);
+  }, [storedCookies, cookieWindow]);
 
   // Add save configuration function
   const saveConfiguration = async () => {
