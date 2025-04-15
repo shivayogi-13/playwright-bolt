@@ -20,6 +20,7 @@ import ConfigurationPanel from './components/ConfigurationPanel';
 import ExecutionPanel from './components/ExecutionPanel';
 import ResultsPanel from './components/ResultsPanel';
 import ApiRequestsPanel from './components/ApiRequestsPanel';
+import AddIcon from '@mui/icons-material/Add';
 
 interface TabPanelProps {
   children?: React.ReactNode;
@@ -93,6 +94,7 @@ function App() {
             <Tabs 
               value={currentTab} 
               onChange={handleTabChange}
+              variant="fullWidth"
               sx={{
                 '& .MuiTab-root': {
                   minHeight: 64,
@@ -105,9 +107,9 @@ function App() {
               }}
             >
               <Tab icon={<SettingsIcon />} label="Configuration" />
-              <Tab icon={<PlayArrowIcon />} label="API Requests" />
-              <Tab icon={<AssessmentIcon />} label="Execution" />
-              <Tab icon={<BarChartIcon />} label="Reports" />
+              <Tab icon={<AddIcon />} label="API Requests" />
+              <Tab icon={<PlayArrowIcon />} label="Execution" />
+              <Tab icon={<AssessmentIcon />} label="Reports" />
             </Tabs>
           </Container>
         </AppBar>

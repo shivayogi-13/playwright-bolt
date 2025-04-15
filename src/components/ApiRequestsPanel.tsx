@@ -32,6 +32,7 @@ import {
   Tabs,
   Tab,
   InputAdornment,
+  CircularProgress,
 } from '@mui/material';
 import {
   Add as AddIcon,
@@ -45,11 +46,29 @@ import {
   PlayArrow as PlayArrowIcon,
   Visibility as VisibilityIcon,
   VisibilityOff as VisibilityOffIcon,
+  Save as SaveIcon,
 } from '@mui/icons-material';
 import { DragDropContext, Droppable, Draggable, DropResult } from 'react-beautiful-dnd';
 import { useSnackbar } from 'notistack';
 import * as XLSX from 'xlsx';
 import { TOTP } from 'otpauth';
+
+// Add Chrome type definitions at the top of the file
+declare namespace chrome {
+  namespace cookies {
+    interface Cookie {
+      name: string;
+      value: string;
+      domain: string;
+      path: string;
+      secure: boolean;
+      httpOnly: boolean;
+      expirationDate?: number;
+    }
+
+    function getAll(details: { url?: string; domain?: string; name?: string; path?: string; secure?: boolean; session?: boolean }): Promise<Cookie[]>;
+  }
+}
 
 interface ApiRequest {
   id: string;
@@ -69,6 +88,7 @@ interface ApiRequest {
   loginUrl?: string;
   username?: string;
   password?: string;
+  tags: string[];
 }
 
 interface Assertion {
@@ -108,17 +128,32 @@ interface Configuration {
   password?: string;
 }
 
+interface MFAConfig {
+  otpInputXPath: string;
+  verifyButtonXPath: string;
+  otpCode: string;
+}
+
+interface Cookie {
+  name: string;
+  value: string;
+  domain: string;
+  path: string;
+  expirationDate?: number;
+}
+
 const defaultApiRequest: ApiRequest = {
+  id: '',
   name: '',
   method: 'GET',
   endpoint: '',
   headers: [],
-  body: '{}',
+  body: '',
   expectedStatus: 200,
-  assertions: [],
-  id: '',
   suite: '',
   environment: '',
+  assertions: [],
+  tags: []
 };
 
 const STORAGE_KEYS = {
@@ -144,378 +179,570 @@ interface ConfigurationTabProps {
 }
 
 const ConfigurationTab: React.FC<ConfigurationTabProps> = ({ config, onConfigChange }) => {
-  const [isCapturingCookies, setIsCapturingCookies] = useState(false);
-  const [cookieCaptureWindow, setCookieCaptureWindow] = useState<Window | null>(null);
-  const [totpSecret, setTotpSecret] = useState('');
-  const [currentTotpCode, setCurrentTotpCode] = useState('');
-  const [showTotpSecret, setShowTotpSecret] = useState(false);
-  const [showTotpCode, setShowTotpCode] = useState(false);
+  const [loginUrl, setLoginUrl] = useState('');
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [mfaCode, setMfaCode] = useState('');
+  const [mfaConfig, setMfaConfig] = useState<MFAConfig>({
+    otpInputXPath: '',
+    verifyButtonXPath: '',
+    otpCode: ''
+  });
+  const [isCapturing, setIsCapturing] = useState(false);
+  const [capturedCookies, setCapturedCookies] = useState<chrome.cookies.Cookie[]>([]);
+  const [cookieWindow, setCookieWindow] = useState<Window | null>(null);
   const { enqueueSnackbar } = useSnackbar();
+  const [storedCookies, setStoredCookies] = useState<{ [key: string]: string }>({});
+  const [isSaving, setIsSaving] = useState(false);
+  const [currentTotpCode, setCurrentTotpCode] = useState('');
+  const [lastGenerated, setLastGenerated] = useState<number>(0);
+  const [remainingTime, setRemainingTime] = useState<number>(30);
+  const [showTotpCode, setShowTotpCode] = useState(false);
+  const [showMfaCode, setShowMfaCode] = useState(false);
 
-  // Generate TOTP code every 30 seconds
+  // Add useEffect to load saved cookies
   useEffect(() => {
-    if (!totpSecret) return;
-
-    const generateTotpCode = () => {
+    const loadSavedCookies = async () => {
       try {
-        const totp = new TOTP({
-          secret: totpSecret,
-          algorithm: 'SHA1',
-          digits: 6,
-          period: 30
-        });
-        const code = totp.generate();
-        setCurrentTotpCode(code);
+        const cookies = await chrome.cookies.getAll({});
+        setCapturedCookies(cookies);
       } catch (error) {
-        console.error('Error generating TOTP code:', error);
-        enqueueSnackbar('Error generating TOTP code', { variant: 'error' });
+        console.error('Error loading cookies:', error);
+      }
+    };
+    loadSavedCookies();
+  }, []);
+
+  // Add useEffect to load stored cookies
+  useEffect(() => {
+    const loadStoredCookies = async () => {
+      try {
+        const cookies = await chrome.cookies.getAll({});
+        const cookieMap: { [key: string]: string } = {};
+        cookies.forEach(cookie => {
+          cookieMap[cookie.name] = cookie.value;
+        });
+        setStoredCookies(cookieMap);
+      } catch (error) {
+        console.error('Error loading stored cookies:', error);
+      }
+    };
+    loadStoredCookies();
+  }, []);
+
+  // Add useEffect for TOTP code generation
+  useEffect(() => {
+    const generateTotpCode = () => {
+      if (mfaConfig.otpCode) {
+        try {
+          const totp = new TOTP({
+            secret: mfaConfig.otpCode,
+            period: 30
+          });
+          const code = totp.generate();
+          setCurrentTotpCode(code);
+          setLastGenerated(Date.now());
+          setRemainingTime(30);
+        } catch (error) {
+          console.error('Error generating TOTP code:', error);
+          enqueueSnackbar('Error generating TOTP code', { variant: 'error' });
+        }
       }
     };
 
-    // Generate initial code
     generateTotpCode();
+    const interval = setInterval(() => {
+      const now = Date.now();
+      const elapsed = Math.floor((now - lastGenerated) / 1000);
+      const newRemainingTime = Math.max(0, 30 - elapsed);
+      setRemainingTime(newRemainingTime);
 
-    // Update code every 30 seconds
-    const interval = setInterval(generateTotpCode, 30000);
+      if (newRemainingTime === 0) {
+        generateTotpCode();
+      }
+    }, 1000);
 
     return () => clearInterval(interval);
-  }, [totpSecret, enqueueSnackbar]);
+  }, [mfaConfig.otpCode, lastGenerated]);
 
+  // Update the startCookieCapture function
   const startCookieCapture = () => {
-    if (!config.loginUrl) {
-      enqueueSnackbar('Please enter a login URL', { variant: 'error' });
+    if (!loginUrl || !username || !password) {
+      enqueueSnackbar('Please fill in all required fields', { variant: 'error' });
       return;
     }
 
-    if (!config.username || !config.password) {
-      enqueueSnackbar('Please enter username and password', { variant: 'error' });
+    if (!mfaConfig.otpInputXPath || !mfaConfig.verifyButtonXPath) {
+      enqueueSnackbar('Please provide XPath for OTP input and verify button', { variant: 'error' });
       return;
     }
 
-    if (!totpSecret) {
-      enqueueSnackbar('Please enter TOTP secret', { variant: 'error' });
-      return;
-    }
-
-    console.log('Starting cookie capture with login...');
-    setIsCapturingCookies(true);
-
-    // Open a new window for cookie capture
-    const newWindow = window.open(config.loginUrl, '_blank', 'width=1200,height=800');
+    const newWindow = window.open(loginUrl, '_blank');
     if (!newWindow) {
-      console.error('Failed to open new window');
-      enqueueSnackbar('Failed to open new window. Please allow popups.', { variant: 'error' });
-      setIsCapturingCookies(false);
+      enqueueSnackbar('Could not open login window. Please allow popups.', { variant: 'error' });
       return;
     }
 
-    setCookieCaptureWindow(newWindow);
-    enqueueSnackbar('Browser window opened for login and cookie capture', { variant: 'info' });
+    setCookieWindow(newWindow);
+    setIsCapturing(true);
 
-    // Set up message handler for cookie capture
-    const messageHandler = (event: MessageEvent) => {
-      if (event.data && event.data.type === 'COOKIES_CAPTURED') {
-        console.log('Received cookies:', event.data.cookies);
-        onConfigChange({
-          ...config,
-          capturedCookies: event.data.cookies
-        });
-        setIsCapturingCookies(false);
-        if (cookieCaptureWindow) {
-          cookieCaptureWindow.close();
-        }
-        enqueueSnackbar('Cookies captured successfully', { variant: 'success' });
-      }
+    // Wait for the window to load
+    newWindow.onload = () => {
+      injectCookieCaptureScript(newWindow);
     };
 
-    window.addEventListener('message', messageHandler);
-    (window as any).cookieMessageHandler = messageHandler;
-
-    // Inject login and cookie capture script
-    const loginAndCookieCaptureScript = `
-      (function() {
-        console.log('Login and cookie capture script initialized');
-        
-        // Function to capture all cookies
-        function captureCookies() {
-          const cookies = document.cookie.split(';').reduce((acc, cookie) => {
-            const [key, value] = cookie.trim().split('=');
-            acc[key] = value;
-            return acc;
-          }, {});
-          
-          console.log('Captured cookies:', cookies);
-          window.opener.postMessage({
-            type: 'COOKIES_CAPTURED',
-            cookies: cookies
-          }, '*');
-        }
-
-        // Function to check if we're on the MFA screen
-        function isOnMfaScreen() {
-          const mfaField = document.querySelector('input[type="text"][name*="code"], input[type="text"][name*="mfa"], input[type="text"][name*="totp"]');
-          return !!mfaField;
-        }
-
-        // Function to check if we're on the login screen
-        function isOnLoginScreen() {
-          const usernameField = document.querySelector('input[type="text"], input[type="email"]');
-          const passwordField = document.querySelector('input[type="password"]');
-          return !!(usernameField && passwordField);
-        }
-
-        // Function to handle MFA verification
-        function handleMfaVerification() {
-          const mfaField = document.querySelector('input[type="text"][name*="code"], input[type="text"][name*="mfa"], input[type="text"][name*="totp"]');
-          if (mfaField) {
-            console.log('Found MFA field, filling in code');
-            mfaField.value = '${currentTotpCode}';
-            mfaField.dispatchEvent(new Event('input', { bubbles: true }));
-            
-            // Find and click the MFA submit button
-            const mfaSubmitButton = document.querySelector('button[type="submit"], input[type="submit"]');
-            if (mfaSubmitButton) {
-              mfaSubmitButton.click();
-            }
-            
-            // Wait for login to complete and capture cookies
-            setTimeout(() => {
-              console.log('MFA verification completed, capturing cookies...');
-              captureCookies();
-            }, 3000);
-          }
-        }
-
-        // Function to handle login with credentials
-        function handleLoginWithCredentials() {
-          const usernameField = document.querySelector('input[type="text"], input[type="email"]');
-          const passwordField = document.querySelector('input[type="password"]');
-          const loginButton = document.querySelector('button[type="submit"], input[type="submit"]');
-          
-          if (usernameField && passwordField && loginButton) {
-            console.log('Found login form elements');
-            
-            // Fill in credentials
-            usernameField.value = '${config.username}';
-            passwordField.value = '${config.password}';
-            
-            // Trigger input events
-            usernameField.dispatchEvent(new Event('input', { bubbles: true }));
-            passwordField.dispatchEvent(new Event('input', { bubbles: true }));
-            
-            // Submit the form
-            loginButton.click();
-            
-            // Wait for MFA page to load
-            setTimeout(() => {
-              handleMfaVerification();
-            }, 2000);
-          } else {
-            console.error('Could not find login form elements');
-            window.opener.postMessage({
-              type: 'LOGIN_ERROR',
-              error: 'Could not find login form elements'
-            }, '*');
-          }
-        }
-
-        // Main automation function
-        function automateLogin() {
-          console.log('Checking current page state...');
-          
-          if (isOnMfaScreen()) {
-            console.log('Already on MFA screen, proceeding with verification');
-            handleMfaVerification();
-          } else if (isOnLoginScreen()) {
-            console.log('On login screen, proceeding with credentials');
-            handleLoginWithCredentials();
-          } else {
-            console.error('Could not determine current page state');
-            window.opener.postMessage({
-              type: 'LOGIN_ERROR',
-              error: 'Could not determine current page state'
-            }, '*');
-          }
-        }
-
-        // Wait for the page to load
-        if (document.readyState === 'complete') {
-          automateLogin();
-        } else {
-          window.addEventListener('load', automateLogin);
-        }
-
-        // Also capture cookies when the user logs in manually
-        const loginForm = document.querySelector('form');
-        if (loginForm) {
-          loginForm.addEventListener('submit', () => {
-            setTimeout(captureCookies, 2000);
-          });
-        }
-      })();
-    `;
-
-    // Wait for the window to load before injecting the script
-    if (newWindow.document.readyState === 'complete') {
-      injectCookieCaptureScript(newWindow, loginAndCookieCaptureScript);
-    } else {
-      newWindow.addEventListener('load', () => {
-        injectCookieCaptureScript(newWindow, loginAndCookieCaptureScript);
-      });
-    }
+    // Listen for MFA screen detection
+    window.addEventListener('message', function(event) {
+      if (event.data.type === 'MFA_SCREEN_DETECTED') {
+        handleMFAVerification(newWindow);
+      } else if (event.data.type === 'COOKIES_CAPTURED') {
+        setCapturedCookies(event.data.cookies);
+        enqueueSnackbar('Cookies captured successfully', { variant: 'success' });
+      }
+    });
   };
 
-  const injectCookieCaptureScript = (targetWindow: Window, script: string) => {
+  const injectCookieCaptureScript = (targetWindow: Window) => {
     try {
+      const script = `
+        (function() {
+          // Function to check if we're on the MFA screen
+          function isOnMfaScreen() {
+            const mfaField = document.evaluate(
+              '${mfaConfig.otpInputXPath}',
+              document,
+              null,
+              XPathResult.FIRST_ORDERED_NODE_TYPE,
+              null
+            ).singleNodeValue;
+            return !!mfaField;
+          }
+
+          // Function to handle MFA verification
+          function handleMfaVerification() {
+            const mfaField = document.evaluate(
+              '${mfaConfig.otpInputXPath}',
+              document,
+              null,
+              XPathResult.FIRST_ORDERED_NODE_TYPE,
+              null
+            ).singleNodeValue;
+            
+            const verifyButton = document.evaluate(
+              '${mfaConfig.verifyButtonXPath}',
+              document,
+              null,
+              XPathResult.FIRST_ORDERED_NODE_TYPE,
+              null
+            ).singleNodeValue;
+
+            if (mfaField && verifyButton) {
+              mfaField.value = '${mfaConfig.otpCode}';
+              mfaField.dispatchEvent(new Event('input', { bubbles: true }));
+              verifyButton.click();
+            }
+          }
+
+          // Function to capture cookies
+          function captureCookies() {
+            const cookies = document.cookie.split(';').map(cookie => {
+              const [name, value] = cookie.trim().split('=');
+              return { name, value };
+            });
+            window.opener.postMessage({
+              type: 'COOKIES_CAPTURED',
+              cookies: cookies
+            }, '*');
+          }
+
+          // Check for MFA screen
+          if (isOnMfaScreen()) {
+            window.opener.postMessage({ type: 'MFA_SCREEN_DETECTED' }, '*');
+          }
+
+          // Capture cookies when the page loads
+          captureCookies();
+        })();
+      `;
+
       const scriptElement = targetWindow.document.createElement('script');
       scriptElement.textContent = script;
       targetWindow.document.head.appendChild(scriptElement);
       targetWindow.document.head.removeChild(scriptElement);
-      console.log('Cookie capture script injected successfully');
     } catch (error) {
-      console.error('Error injecting cookie capture script:', error);
-      enqueueSnackbar('Error setting up cookie capture', { variant: 'error' });
-      setIsCapturingCookies(false);
+      console.error('Error injecting script:', error);
+      enqueueSnackbar('Error injecting script', { variant: 'error' });
+    }
+  };
+
+  const handleMFAVerification = (targetWindow: Window) => {
+    try {
+      const script = `
+        (function() {
+          const mfaField = document.evaluate(
+            '${mfaConfig.otpInputXPath}',
+            document,
+            null,
+            XPathResult.FIRST_ORDERED_NODE_TYPE,
+            null
+          ).singleNodeValue;
+          
+          const verifyButton = document.evaluate(
+            '${mfaConfig.verifyButtonXPath}',
+            document,
+            null,
+            XPathResult.FIRST_ORDERED_NODE_TYPE,
+            null
+          ).singleNodeValue;
+
+          if (mfaField && verifyButton) {
+            mfaField.value = '${mfaConfig.otpCode}';
+            mfaField.dispatchEvent(new Event('input', { bubbles: true }));
+            verifyButton.click();
+          }
+        })();
+      `;
+
+      const scriptElement = targetWindow.document.createElement('script');
+      scriptElement.textContent = script;
+      targetWindow.document.head.appendChild(scriptElement);
+      targetWindow.document.head.removeChild(scriptElement);
+    } catch (error) {
+      console.error('Error handling MFA verification:', error);
+      enqueueSnackbar('Error handling MFA verification', { variant: 'error' });
     }
   };
 
   const stopCookieCapture = () => {
-    setIsCapturingCookies(false);
-    if (cookieCaptureWindow) {
-      cookieCaptureWindow.close();
-      setCookieCaptureWindow(null);
-    }
-    if ((window as any).cookieMessageHandler) {
-      window.removeEventListener('message', (window as any).cookieMessageHandler);
-      delete (window as any).cookieMessageHandler;
+    setIsCapturing(false);
+    if (cookieWindow) {
+      cookieWindow.close();
+      setCookieWindow(null);
     }
   };
 
+  // Add save configuration function
+  const saveConfiguration = async () => {
+    try {
+      setIsSaving(true);
+      
+      // Update the config with current values
+      const updatedConfig = {
+        ...config,
+        loginUrl,
+        username,
+        password,
+        mfaConfig,
+        capturedCookies: storedCookies
+      };
+
+      // Save to localStorage
+      localStorage.setItem('apiRequestConfig', JSON.stringify(updatedConfig));
+      
+      // Update parent component
+      onConfigChange(updatedConfig);
+      
+      enqueueSnackbar('Configuration saved successfully', { variant: 'success' });
+    } catch (error) {
+      console.error('Error saving configuration:', error);
+      enqueueSnackbar('Error saving configuration', { variant: 'error' });
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  // Add useEffect to load saved configuration
   useEffect(() => {
-    return () => {
-      if (cookieCaptureWindow) {
-        cookieCaptureWindow.close();
-      }
-      if ((window as any).cookieMessageHandler) {
-        window.removeEventListener('message', (window as any).cookieMessageHandler);
-        delete (window as any).cookieMessageHandler;
+    const loadSavedConfiguration = () => {
+      try {
+        const savedConfig = localStorage.getItem('apiRequestConfig');
+        if (savedConfig) {
+          const parsedConfig = JSON.parse(savedConfig);
+          setLoginUrl(parsedConfig.loginUrl || '');
+          setUsername(parsedConfig.username || '');
+          setPassword(parsedConfig.password || '');
+          setMfaConfig(parsedConfig.mfaConfig || {
+            otpInputXPath: '',
+            verifyButtonXPath: '',
+            otpCode: ''
+          });
+          setStoredCookies(parsedConfig.capturedCookies || {});
+        }
+      } catch (error) {
+        console.error('Error loading saved configuration:', error);
       }
     };
-  }, [cookieCaptureWindow]);
 
+    loadSavedConfiguration();
+  }, []);
+
+  // Update the JSX to display captured cookies
   return (
-    <Box sx={{ p: 2 }}>
-      <Typography variant="h6" gutterBottom>
-        Login and Cookie Capture Configuration
-      </Typography>
-      
-      <TextField
-        fullWidth
-        label="Login URL"
-        value={config.loginUrl || ''}
-        onChange={(e) => onConfigChange({ ...config, loginUrl: e.target.value })}
-        margin="normal"
-        helperText="Enter the URL of the login page"
-      />
-
-      <TextField
-        fullWidth
-        label="Username"
-        value={config.username || ''}
-        onChange={(e) => onConfigChange({ ...config, username: e.target.value })}
-        margin="normal"
-      />
-
-      <TextField
-        fullWidth
-        label="Password"
-        type="password"
-        value={config.password || ''}
-        onChange={(e) => onConfigChange({ ...config, password: e.target.value })}
-        margin="normal"
-      />
-
-      <TextField
-        fullWidth
-        label="TOTP Secret"
-        type={showTotpSecret ? "text" : "password"}
-        value={totpSecret}
-        onChange={(e) => setTotpSecret(e.target.value)}
-        margin="normal"
-        helperText="Enter your TOTP secret key"
-        InputProps={{
-          endAdornment: (
-            <InputAdornment position="end">
-              <IconButton
-                onClick={() => setShowTotpSecret(!showTotpSecret)}
-                edge="end"
-              >
-                {showTotpSecret ? <VisibilityOffIcon /> : <VisibilityIcon />}
-              </IconButton>
-            </InputAdornment>
-          ),
-        }}
-      />
-
-      {currentTotpCode && (
-        <Box sx={{ mt: 2, mb: 2 }}>
-          <Typography variant="subtitle1">Current TOTP Code:</Typography>
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-            <Typography variant="h6" sx={{ fontFamily: 'monospace' }}>
-              {showTotpCode ? currentTotpCode : '••••••'}
-            </Typography>
-            <IconButton
-              onClick={() => setShowTotpCode(!showTotpCode)}
-              size="small"
-            >
-              {showTotpCode ? <VisibilityOffIcon /> : <VisibilityIcon />}
-            </IconButton>
-          </Box>
-          <Typography variant="caption" color="text.secondary">
-            Code updates every 30 seconds
-          </Typography>
-        </Box>
-      )}
-
-      <Box sx={{ mt: 2, display: 'flex', gap: 2 }}>
+    <Box sx={{ p: 3 }}>
+      <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
+        <Typography variant="h6" gutterBottom>
+          Login Configuration
+        </Typography>
         <Button
           variant="contained"
           color="primary"
-          onClick={startCookieCapture}
-          disabled={isCapturingCookies || !config.loginUrl || !config.username || !config.password || !totpSecret}
+          onClick={saveConfiguration}
+          disabled={isSaving}
+          startIcon={isSaving ? <CircularProgress size={20} /> : <SaveIcon />}
         >
-          {isCapturingCookies ? 'Logging in and Capturing Cookies...' : 'Start Login and Cookie Capture'}
+          {isSaving ? 'Saving...' : 'Save Configuration'}
         </Button>
-        
-        {isCapturingCookies && (
+      </Box>
+      <form onSubmit={(e) => { e.preventDefault(); startCookieCapture(); }}>
+        <Grid container spacing={2}>
+          <Grid item xs={12}>
+            <TextField
+              fullWidth
+              label="Login URL"
+              value={loginUrl}
+              onChange={(e) => setLoginUrl(e.target.value)}
+              required
+            />
+          </Grid>
+          <Grid item xs={12}>
+            <TextField
+              fullWidth
+              label="Username"
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              required
+            />
+          </Grid>
+          <Grid item xs={12}>
+            <TextField
+              fullWidth
+              label="Password"
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              required
+            />
+          </Grid>
+          <Grid item xs={12}>
+            <Typography variant="subtitle1" gutterBottom>
+              MFA Configuration
+            </Typography>
+          </Grid>
+          <Grid item xs={12}>
+            <TextField
+              fullWidth
+              label="OTP Input XPath"
+              value={mfaConfig.otpInputXPath}
+              onChange={(e) => setMfaConfig(prev => ({ ...prev, otpInputXPath: e.target.value }))}
+              helperText="Enter XPath to locate OTP input field"
+              required
+            />
+          </Grid>
+          <Grid item xs={12}>
+            <TextField
+              fullWidth
+              label="Verify Button XPath"
+              value={mfaConfig.verifyButtonXPath}
+              onChange={(e) => setMfaConfig(prev => ({ ...prev, verifyButtonXPath: e.target.value }))}
+              helperText="Enter XPath to locate verify button"
+              required
+            />
+          </Grid>
+          <Grid item xs={12}>
+            <TextField
+              fullWidth
+              label="MFA Code"
+              value={mfaConfig.otpCode}
+              onChange={(e) => setMfaConfig(prev => ({ ...prev, otpCode: e.target.value }))}
+              helperText="Enter the MFA code to be used"
+              required
+              type={showMfaCode ? 'text' : 'password'}
+              InputProps={{
+                endAdornment: (
+                  <InputAdornment position="end">
+                    <IconButton
+                      onClick={() => setShowMfaCode(!showMfaCode)}
+                      edge="end"
+                    >
+                      {showMfaCode ? <VisibilityOffIcon /> : <VisibilityIcon />}
+                    </IconButton>
+                  </InputAdornment>
+                ),
+              }}
+            />
+          </Grid>
+          <Grid item xs={12}>
+            <Button
+              type="submit"
+              variant="contained"
+              color="primary"
+              disabled={isCapturing}
+            >
+              Start Login
+            </Button>
+            {isCapturing && (
+              <Button
+                variant="outlined"
+                color="secondary"
+                onClick={stopCookieCapture}
+                sx={{ ml: 2 }}
+              >
+                Stop
+              </Button>
+            )}
+          </Grid>
+        </Grid>
+      </form>
+
+      {/* Update TOTP Code View Section */}
+      {mfaConfig.otpCode && (
+        <Box sx={{ mt: 4 }}>
+          <Typography variant="h6" gutterBottom>
+            Current TOTP Code
+          </Typography>
+          <Paper sx={{ p: 2, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+              <Typography 
+                variant="h6" 
+                sx={{ 
+                  fontFamily: 'monospace',
+                  letterSpacing: '0.2em',
+                  minWidth: '120px'
+                }}
+              >
+                {showTotpCode ? currentTotpCode : '••••••'}
+              </Typography>
+              <IconButton
+                onClick={() => setShowTotpCode(!showTotpCode)}
+                size="small"
+              >
+                {showTotpCode ? <VisibilityOffIcon /> : <VisibilityIcon />}
+              </IconButton>
+            </Box>
+            <Box sx={{ display: 'flex', alignItems: 'center' }}>
+              <CircularProgress
+                variant="determinate"
+                value={(remainingTime / 30) * 100}
+                size={24}
+                sx={{ mr: 1 }}
+              />
+              <Typography variant="body2" color="text.secondary">
+                {remainingTime}s remaining
+              </Typography>
+            </Box>
+          </Paper>
+        </Box>
+      )}
+
+      {/* Stored Cookies Section */}
+      <Box sx={{ mt: 4 }}>
+        <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
+          <Typography variant="h6" gutterBottom>
+            Stored Cookies
+          </Typography>
           <Button
             variant="outlined"
-            color="error"
-            onClick={stopCookieCapture}
+            color="primary"
+            size="small"
+            onClick={saveConfiguration}
+            disabled={isSaving}
           >
-            Stop Capture
+            Save Changes
           </Button>
-        )}
+        </Box>
+        <TableContainer component={Paper} variant="outlined">
+          <Table size="small">
+            <TableHead>
+              <TableRow>
+                <TableCell>Name</TableCell>
+                <TableCell>Value</TableCell>
+                <TableCell>Actions</TableCell>
+              </TableRow>
+            </TableHead>
+            <TableBody>
+              {Object.entries(storedCookies).map(([name, value]) => (
+                <TableRow key={name}>
+                  <TableCell>{name}</TableCell>
+                  <TableCell>
+                    <Box sx={{ display: 'flex', alignItems: 'center' }}>
+                      <Typography sx={{ fontFamily: 'monospace' }}>
+                        {value}
+                      </Typography>
+                      <IconButton
+                        size="small"
+                        onClick={() => {
+                          navigator.clipboard.writeText(value);
+                          enqueueSnackbar('Cookie value copied to clipboard', { variant: 'success' });
+                        }}
+                      >
+                        <ContentCopyIcon fontSize="small" />
+                      </IconButton>
+                    </Box>
+                  </TableCell>
+                  <TableCell>
+                    <IconButton
+                      size="small"
+                      onClick={() => {
+                        const newCookies = { ...storedCookies };
+                        delete newCookies[name];
+                        setStoredCookies(newCookies);
+                        enqueueSnackbar('Cookie removed', { variant: 'success' });
+                      }}
+                    >
+                      <DeleteIcon fontSize="small" />
+                    </IconButton>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </TableContainer>
       </Box>
 
-      {config.capturedCookies && Object.keys(config.capturedCookies).length > 0 && (
-        <Box sx={{ mt: 3 }}>
-          <Typography variant="subtitle1" gutterBottom>
-            Captured Cookies:
+      {/* Captured Cookies Section */}
+      {capturedCookies.length > 0 && (
+        <Box sx={{ mt: 4 }}>
+          <Typography variant="h6" gutterBottom>
+            Captured Cookies
           </Typography>
           <TableContainer component={Paper}>
             <Table size="small">
               <TableHead>
                 <TableRow>
-                  <TableCell>Cookie Name</TableCell>
+                  <TableCell>Name</TableCell>
                   <TableCell>Value</TableCell>
+                  <TableCell>Domain</TableCell>
+                  <TableCell>Path</TableCell>
+                  <TableCell>Expires</TableCell>
+                  <TableCell>Actions</TableCell>
                 </TableRow>
               </TableHead>
               <TableBody>
-                {Object.entries(config.capturedCookies).map(([name, value]) => (
-                  <TableRow key={name}>
-                    <TableCell>{name}</TableCell>
-                    <TableCell>{value}</TableCell>
+                {capturedCookies.map((cookie, index) => (
+                  <TableRow key={index}>
+                    <TableCell>{cookie.name}</TableCell>
+                    <TableCell>{cookie.value}</TableCell>
+                    <TableCell>{cookie.domain}</TableCell>
+                    <TableCell>{cookie.path}</TableCell>
+                    <TableCell>
+                      {cookie.expirationDate
+                        ? new Date(cookie.expirationDate * 1000).toLocaleString()
+                        : 'Session'}
+                    </TableCell>
+                    <TableCell>
+                      <IconButton
+                        size="small"
+                        onClick={() => {
+                          setStoredCookies(prev => ({
+                            ...prev,
+                            [cookie.name]: cookie.value
+                          }));
+                          enqueueSnackbar('Cookie stored', { variant: 'success' });
+                        }}
+                      >
+                        <SaveIcon fontSize="small" />
+                      </IconButton>
+                    </TableCell>
                   </TableRow>
                 ))}
               </TableBody>
@@ -547,6 +774,7 @@ function ApiRequestsPanel() {
   const [isCapturingCookies, setIsCapturingCookies] = useState(false);
   const [cookieCaptureWindow, setCookieCaptureWindow] = useState<Window | null>(null);
   const [activeTab, setActiveTab] = useState(0);
+  const [newTag, setNewTag] = useState('');
 
   // Load saved data on mount
   useEffect(() => {
@@ -618,16 +846,8 @@ function ApiRequestsPanel() {
 
   const handleAddRequest = () => {
     setCurrentApiRequest({
-      name: '',
-      method: 'GET',
-      endpoint: '',
-      headers: [],
-      body: '',
-      expectedStatus: 200,
-      assertions: [],
-      id: '',
-      suite: '',
-      environment: selectedEnvironment,
+      ...defaultApiRequest,
+      environment: selectedEnvironment
     });
     setIsApiDialogOpen(true);
   };
@@ -922,6 +1142,7 @@ function ApiRequestsPanel() {
       ...request,
       name: `${request.name} (${nextCopyNumber})`,
       id: Date.now().toString(),
+      tags: request.tags.slice(),
     };
     setApiRequests(prev => [...prev, newRequest]);
     localStorage.setItem(STORAGE_KEYS.API_REQUESTS, JSON.stringify([...apiRequests, newRequest]));
@@ -948,22 +1169,9 @@ function ApiRequestsPanel() {
   const handleApiRequestEdit = (request: ApiRequest) => {
     setCurrentApiRequest({
       ...request,
-      suite: request.suite || '',
-      id: request.id || '',
-      headers: request.headers || [],
-      body: request.body || '',
-      environment: request.environment || selectedEnvironment,
-      assertions: request.assertions.map(assertion => ({
-        ...assertion,
-        id: assertion.id || Date.now().toString(),
-        type: assertion.type || 'body',
-        path: assertion.path || '',
-        operator: assertion.operator || 'equals',
-        value: assertion.value || '',
-        validationType: assertion.validationType || 'value',
-        schema: assertion.schema || '',
-        keyValuePairs: assertion.keyValuePairs || []
-      }))
+      headers: Array.isArray(request.headers) ? request.headers : [],
+      assertions: Array.isArray(request.assertions) ? request.assertions : [],
+      tags: Array.isArray(request.tags) ? request.tags : []
     });
     setIsApiDialogOpen(true);
   };
@@ -981,10 +1189,14 @@ function ApiRequestsPanel() {
       
       setCurrentApiRequest(prev => ({
         ...prev,
-        headers
+        headers: headers || []
       }));
     } catch (error) {
       console.error('Error parsing headers:', error);
+      setCurrentApiRequest(prev => ({
+        ...prev,
+        headers: []
+      }));
     }
   };
 
@@ -1287,7 +1499,8 @@ function ApiRequestsPanel() {
         expectedStatus: request.status,
         assertions: [],
         suite: 'recorded',
-        environment: selectedEnvironment
+        environment: selectedEnvironment,
+        tags: [],
       };
 
       setApiRequests(prev => {
@@ -1303,64 +1516,133 @@ function ApiRequestsPanel() {
     }
   };
 
+  const handleExportToExcel = () => {
+    try {
+      // Prepare data for export
+      const exportData = apiRequests.map(request => ({
+        'Name': request.name || '',
+        'Method': request.method || 'GET',
+        'Endpoint': request.endpoint || '',
+        'Headers': JSON.stringify(request.headers || [], null, 2),
+        'Body': request.body || '',
+        'Expected Status': request.expectedStatus || 200,
+        'Suite': request.suite || '',
+        'Environment': request.environment || '',
+        'Tags': (request.tags || []).join(', '),
+        'Assertions': JSON.stringify(request.assertions || [], null, 2)
+      }));
+
+      // Create worksheet
+      const ws = XLSX.utils.json_to_sheet(exportData);
+      
+      // Set column widths
+      const wscols = [
+        {wch: 20}, // Name
+        {wch: 10}, // Method
+        {wch: 40}, // Endpoint
+        {wch: 30}, // Headers
+        {wch: 30}, // Body
+        {wch: 15}, // Expected Status
+        {wch: 15}, // Suite
+        {wch: 15}, // Environment
+        {wch: 20}, // Tags
+        {wch: 40}  // Assertions
+      ];
+      ws['!cols'] = wscols;
+
+      // Create workbook and add worksheet
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'API Requests');
+
+      // Save file
+      XLSX.writeFile(wb, 'api-requests.xlsx');
+      enqueueSnackbar('API requests exported successfully', { variant: 'success' });
+    } catch (error) {
+      console.error('Error exporting to Excel:', error);
+      enqueueSnackbar('Error exporting API requests', { variant: 'error' });
+    }
+  };
+
+  const handleImportFromExcel = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const data = new Uint8Array(e.target?.result as ArrayBuffer);
+        const workbook = XLSX.read(data, { type: 'array' });
+        const worksheet = workbook.Sheets[workbook.SheetNames[0]];
+        const jsonData = XLSX.utils.sheet_to_json(worksheet);
+
+        const importedRequests = jsonData.map((item: any) => ({
+          id: Date.now().toString() + Math.random().toString(36).substr(2, 9),
+          name: item['Name'] || '',
+          method: item['Method'] || 'GET',
+          endpoint: item['Endpoint'] || '',
+          headers: item['Headers'] ? JSON.parse(item['Headers']) : [],
+          body: item['Body'] || '',
+          expectedStatus: item['Expected Status'] || 200,
+          suite: item['Suite'] || '',
+          environment: item['Environment'] || selectedEnvironment,
+          tags: item['Tags'] ? item['Tags'].split(',').map((tag: string) => tag.trim()) : [],
+          assertions: item['Assertions'] ? JSON.parse(item['Assertions']) : []
+        }));
+
+        setApiRequests(prev => [...prev, ...importedRequests]);
+        localStorage.setItem(STORAGE_KEYS.API_REQUESTS, JSON.stringify([...apiRequests, ...importedRequests]));
+        enqueueSnackbar('API requests imported successfully', { variant: 'success' });
+      } catch (error) {
+        console.error('Error importing from Excel:', error);
+        enqueueSnackbar('Error importing API requests', { variant: 'error' });
+      }
+    };
+    reader.readAsArrayBuffer(file);
+  };
+
   return (
     <Box sx={{ p: 3 }}>
       <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
         <Typography variant="h5" gutterBottom sx={{ color: 'primary.main', fontWeight: 'bold' }}>
           API Requests
         </Typography>
-        <Box sx={{ display: 'flex', gap: 2 }}>
-          <FormControl size="small" sx={{ minWidth: 200 }}>
-            <InputLabel>Select Environment</InputLabel>
-            <Select
-              value={selectedEnvironment}
-              label="Select Environment"
-              onChange={handleEnvironmentChange}
-            >
-              {environments.map((env) => (
-                <MenuItem key={env.name} value={env.name}>
-                  {env.name}
-                </MenuItem>
-              ))}
-            </Select>
-          </FormControl>
+        <Box sx={{ 
+          display: 'flex', 
+          justifyContent: 'flex-end', 
+          alignItems: 'center', 
+          gap: 2, 
+          mb: 2,
+          flexWrap: 'wrap'
+        }}>
           <Button
             variant="outlined"
-            size="small"
             startIcon={<DownloadIcon />}
-            onClick={downloadTemplate}
+            onClick={handleExportToExcel}
+            size="small"
           >
-            Template
+            Export
           </Button>
           <Button
             variant="outlined"
-            size="small"
             component="label"
             startIcon={<UploadFileIcon />}
+            size="small"
           >
             Import
             <input
               type="file"
               hidden
               accept=".xlsx,.xls"
-              onChange={handleFileUpload}
+              onChange={handleImportFromExcel}
             />
           </Button>
           <Button
             variant="contained"
-            size="small"
             startIcon={<AddIcon />}
-            onClick={handleApiDialogOpen}
+            onClick={handleAddRequest}
+            size="small"
           >
             Add Request
-          </Button>
-          <Button
-            variant="outlined"
-            color={isRecording ? "error" : "primary"}
-            onClick={isRecording ? stopRecording : startRecording}
-            startIcon={isRecording ? <StopIcon /> : <PlayArrowIcon />}
-          >
-            {isRecording ? 'Stop Recording' : 'Start Recording'}
           </Button>
         </Box>
       </Box>
@@ -1395,6 +1677,7 @@ function ApiRequestsPanel() {
                                 <TableCell>Suite</TableCell>
                                 <TableCell>Status</TableCell>
                                 <TableCell>Assertions</TableCell>
+                                <TableCell>Tags</TableCell>
                                 <TableCell>Actions</TableCell>
                               </TableRow>
                             </TableHead>
@@ -1435,11 +1718,29 @@ function ApiRequestsPanel() {
                                         <TableCell>{request.expectedStatus}</TableCell>
                                         <TableCell>
                                           <Chip 
-                                            label={`${request.assertions.length} assertions`}
+                                            label={`${request.assertions?.length || 0} assertions`}
                                             size="small"
                                             color="primary"
                                             variant="outlined"
                                           />
+                                        </TableCell>
+                                        <TableCell>
+                                          <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5 }}>
+                                            {(request.tags || []).map((tag, index) => (
+                                              <Chip
+                                                key={index}
+                                                label={tag}
+                                                size="small"
+                                                sx={{ 
+                                                  backgroundColor: 'primary.light',
+                                                  color: 'primary.contrastText',
+                                                  '&:hover': {
+                                                    backgroundColor: 'primary.main',
+                                                  }
+                                                }}
+                                              />
+                                            ))}
+                                          </Box>
                                         </TableCell>
                                         <TableCell>
                                           <Box sx={{ display: 'flex', gap: 1 }}>
@@ -1481,7 +1782,7 @@ function ApiRequestsPanel() {
                                                   <Typography variant="subtitle2" gutterBottom>
                                                     Assertions
                                                   </Typography>
-                                                  {request.assertions.map((assertion, assertionIndex) => (
+                                                  {(request.assertions || []).map((assertion, assertionIndex) => (
                                                     <Box key={assertion.id} sx={{ mb: 2, p: 2, border: '1px solid', borderColor: 'divider', borderRadius: 1 }}>
                                                       <Grid container spacing={2}>
                                                         <Grid item xs={12} sm={3}>
@@ -1652,7 +1953,7 @@ function ApiRequestsPanel() {
                 fullWidth
                 multiline
                 rows={3}
-                value={currentApiRequest.headers.map(h => `${h.key}: ${h.value}`).join('\n')}
+                value={Array.isArray(currentApiRequest.headers) ? currentApiRequest.headers.map(h => `${h.key}: ${h.value}`).join('\n') : ''}
                 onChange={handleHeaderChange}
                 helperText="Enter headers in 'key: value' format (one per line)"
               />
@@ -1667,6 +1968,59 @@ function ApiRequestsPanel() {
                 onChange={(e) => setCurrentApiRequest({ ...currentApiRequest, body: e.target.value })}
                 helperText="Enter request body in JSON format"
               />
+            </Grid>
+            <Grid item xs={12}>
+              <Box sx={{ mb: 2 }}>
+                <Typography variant="subtitle2" gutterBottom>
+                  Tags
+                </Typography>
+                <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1, mb: 1 }}>
+                  {currentApiRequest.tags.map((tag, index) => (
+                    <Chip
+                      key={index}
+                      label={tag}
+                      onDelete={() => {
+                        setCurrentApiRequest(prev => ({
+                          ...prev,
+                          tags: prev.tags.filter((_, i) => i !== index)
+                        }));
+                      }}
+                    />
+                  ))}
+                </Box>
+                <Box sx={{ display: 'flex', gap: 1 }}>
+                  <TextField
+                    size="small"
+                    placeholder="Add tag"
+                    value={newTag}
+                    onChange={(e) => setNewTag(e.target.value)}
+                    onKeyPress={(e) => {
+                      if (e.key === 'Enter' && newTag.trim()) {
+                        setCurrentApiRequest(prev => ({
+                          ...prev,
+                          tags: [...prev.tags, newTag.trim()]
+                        }));
+                        setNewTag('');
+                      }
+                    }}
+                  />
+                  <Button
+                    variant="outlined"
+                    size="small"
+                    onClick={() => {
+                      if (newTag.trim()) {
+                        setCurrentApiRequest(prev => ({
+                          ...prev,
+                          tags: [...prev.tags, newTag.trim()]
+                        }));
+                        setNewTag('');
+                      }
+                    }}
+                  >
+                    Add
+                  </Button>
+                </Box>
+              </Box>
             </Grid>
 
             {/* Assertions Section */}
