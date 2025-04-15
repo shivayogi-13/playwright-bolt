@@ -272,11 +272,6 @@ const ConfigurationTab: React.FC<ConfigurationTabProps> = ({ config, onConfigCha
       return;
     }
 
-    if (!mfaConfig.otpInputXPath || !mfaConfig.verifyButtonXPath) {
-      enqueueSnackbar('Please provide XPath for OTP input and verify button', { variant: 'error' });
-      return;
-    }
-
     const newWindow = window.open(loginUrl, '_blank');
     if (!newWindow) {
       enqueueSnackbar('Could not open login window. Please allow popups.', { variant: 'error' });
@@ -288,18 +283,46 @@ const ConfigurationTab: React.FC<ConfigurationTabProps> = ({ config, onConfigCha
 
     // Wait for the window to load
     newWindow.onload = () => {
-      injectCookieCaptureScript(newWindow);
-    };
+      // Inject cookie capture script
+      const script = `
+        (function() {
+          // Function to capture cookies
+          function captureCookies() {
+            try {
+              const cookies = document.cookie.split(';').map(cookie => {
+                const [name, value] = cookie.trim().split('=');
+                return { name, value };
+              });
+              window.opener.postMessage({
+                type: 'COOKIES_CAPTURED',
+                cookies: cookies
+              }, '*');
+            } catch (error) {
+              console.error('Error capturing cookies:', error);
+            }
+          }
 
-    // Listen for MFA screen detection
-    window.addEventListener('message', function(event) {
-      if (event.data.type === 'MFA_SCREEN_DETECTED') {
-        handleMFAVerification(newWindow);
-      } else if (event.data.type === 'COOKIES_CAPTURED') {
-        setCapturedCookies(event.data.cookies);
-        enqueueSnackbar('Cookies captured successfully', { variant: 'success' });
+          // Capture cookies on page load
+          captureCookies();
+
+          // Set up periodic cookie capture
+          setInterval(captureCookies, 5000);
+
+          // Capture cookies before window unload
+          window.addEventListener('beforeunload', captureCookies);
+        })();
+      `;
+
+      try {
+        const scriptElement = newWindow.document.createElement('script');
+        scriptElement.textContent = script;
+        newWindow.document.head.appendChild(scriptElement);
+        newWindow.document.head.removeChild(scriptElement);
+      } catch (error) {
+        console.error('Error injecting cookie capture script:', error);
+        enqueueSnackbar('Error setting up cookie capture', { variant: 'error' });
       }
-    });
+    };
   };
 
   const injectCookieCaptureScript = (targetWindow: Window) => {
@@ -318,29 +341,45 @@ const ConfigurationTab: React.FC<ConfigurationTabProps> = ({ config, onConfigCha
             return !!mfaField;
           }
 
-          // Function to handle MFA verification
+          // Function to handle MFA verification with delay
           function handleMfaVerification() {
-            const mfaField = document.evaluate(
-              '${mfaConfig.otpInputXPath}',
-              document,
-              null,
-              XPathResult.FIRST_ORDERED_NODE_TYPE,
-              null
-            ).singleNodeValue;
-            
-            const verifyButton = document.evaluate(
-              '${mfaConfig.verifyButtonXPath}',
-              document,
-              null,
-              XPathResult.FIRST_ORDERED_NODE_TYPE,
-              null
-            ).singleNodeValue;
+            setTimeout(() => {
+              const mfaField = document.evaluate(
+                '${mfaConfig.otpInputXPath}',
+                document,
+                null,
+                XPathResult.FIRST_ORDERED_NODE_TYPE,
+                null
+              ).singleNodeValue;
+              
+              const verifyButton = document.evaluate(
+                '${mfaConfig.verifyButtonXPath}',
+                document,
+                null,
+                XPathResult.FIRST_ORDERED_NODE_TYPE,
+                null
+              ).singleNodeValue;
 
-            if (mfaField && verifyButton) {
-              mfaField.value = '${mfaConfig.otpCode}';
-              mfaField.dispatchEvent(new Event('input', { bubbles: true }));
-              verifyButton.click();
-            }
+              if (mfaField && verifyButton) {
+                // Clear any existing value
+                mfaField.value = '';
+                // Trigger input event
+                mfaField.dispatchEvent(new Event('input', { bubbles: true }));
+                // Add delay before setting value
+                setTimeout(() => {
+                  mfaField.value = '${mfaConfig.otpCode}';
+                  mfaField.dispatchEvent(new Event('input', { bubbles: true }));
+                  mfaField.dispatchEvent(new Event('change', { bubbles: true }));
+                  
+                  // Add delay before clicking verify button
+                  setTimeout(() => {
+                    verifyButton.click();
+                    // Capture cookies after verification
+                    setTimeout(captureCookies, 2000);
+                  }, 1000);
+                }, 500);
+              }
+            }, 2000);
           }
 
           // Function to capture cookies
@@ -379,27 +418,52 @@ const ConfigurationTab: React.FC<ConfigurationTabProps> = ({ config, onConfigCha
     try {
       const script = `
         (function() {
-          const mfaField = document.evaluate(
-            '${mfaConfig.otpInputXPath}',
-            document,
-            null,
-            XPathResult.FIRST_ORDERED_NODE_TYPE,
-            null
-          ).singleNodeValue;
-          
-          const verifyButton = document.evaluate(
-            '${mfaConfig.verifyButtonXPath}',
-            document,
-            null,
-            XPathResult.FIRST_ORDERED_NODE_TYPE,
-            null
-          ).singleNodeValue;
+          setTimeout(() => {
+            const mfaField = document.evaluate(
+              '${mfaConfig.otpInputXPath}',
+              document,
+              null,
+              XPathResult.FIRST_ORDERED_NODE_TYPE,
+              null
+            ).singleNodeValue;
+            
+            const verifyButton = document.evaluate(
+              '${mfaConfig.verifyButtonXPath}',
+              document,
+              null,
+              XPathResult.FIRST_ORDERED_NODE_TYPE,
+              null
+            ).singleNodeValue;
 
-          if (mfaField && verifyButton) {
-            mfaField.value = '${mfaConfig.otpCode}';
-            mfaField.dispatchEvent(new Event('input', { bubbles: true }));
-            verifyButton.click();
-          }
+            if (mfaField && verifyButton) {
+              // Clear any existing value
+              mfaField.value = '';
+              // Trigger input event
+              mfaField.dispatchEvent(new Event('input', { bubbles: true }));
+              // Add delay before setting value
+              setTimeout(() => {
+                mfaField.value = '${mfaConfig.otpCode}';
+                mfaField.dispatchEvent(new Event('input', { bubbles: true }));
+                mfaField.dispatchEvent(new Event('change', { bubbles: true }));
+                
+                // Add delay before clicking verify button
+                setTimeout(() => {
+                  verifyButton.click();
+                  // Capture cookies after verification
+                  setTimeout(() => {
+                    const cookies = document.cookie.split(';').map(cookie => {
+                      const [name, value] = cookie.trim().split('=');
+                      return { name, value };
+                    });
+                    window.opener.postMessage({
+                      type: 'COOKIES_CAPTURED',
+                      cookies: cookies
+                    }, '*');
+                  }, 2000);
+                }, 1000);
+              }, 500);
+            }
+          }, 2000);
         })();
       `;
 
@@ -416,10 +480,88 @@ const ConfigurationTab: React.FC<ConfigurationTabProps> = ({ config, onConfigCha
   const stopCookieCapture = () => {
     setIsCapturing(false);
     if (cookieWindow) {
-      cookieWindow.close();
-      setCookieWindow(null);
+      // Capture cookies one last time before closing
+      const script = `
+        (function() {
+          try {
+            // Get all cookies
+            const cookies = document.cookie.split(';').map(cookie => {
+              const [name, value] = cookie.trim().split('=');
+              return { name, value };
+            });
+            
+            // Send cookies to parent window
+            window.opener.postMessage({
+              type: 'COOKIES_CAPTURED',
+              cookies: cookies
+            }, '*');
+            
+            // Wait a bit to ensure message is sent
+            setTimeout(() => {
+              window.close();
+            }, 500);
+          } catch (error) {
+            console.error('Error capturing final cookies:', error);
+            window.close();
+          }
+        })();
+      `;
+
+      try {
+        const scriptElement = cookieWindow.document.createElement('script');
+        scriptElement.textContent = script;
+        cookieWindow.document.head.appendChild(scriptElement);
+        cookieWindow.document.head.removeChild(scriptElement);
+      } catch (error) {
+        console.error('Error injecting final cookie capture script:', error);
+        cookieWindow.close();
+      }
     }
+    setCookieWindow(null);
   };
+
+  // Update the message handler to properly store cookies
+  useEffect(() => {
+    const handleMessage = (event: MessageEvent) => {
+      if (event.data.type === 'MFA_SCREEN_DETECTED') {
+        handleMFAVerification(cookieWindow!);
+      } else if (event.data.type === 'COOKIES_CAPTURED') {
+        const newCookies = event.data.cookies.reduce((acc: { [key: string]: string }, cookie: { name: string; value: string }) => {
+          if (cookie.name && cookie.value) {
+            acc[cookie.name] = cookie.value;
+          }
+          return acc;
+        }, {});
+        
+        // Update stored cookies
+        setStoredCookies(prev => ({
+          ...prev,
+          ...newCookies
+        }));
+        
+        // Save the updated cookies to localStorage
+        const updatedConfig = {
+          ...config,
+          capturedCookies: {
+            ...config.capturedCookies,
+            ...newCookies
+          }
+        };
+        
+        try {
+          localStorage.setItem('apiRequestConfig', JSON.stringify(updatedConfig));
+          onConfigChange(updatedConfig);
+          enqueueSnackbar('Cookies captured successfully', { variant: 'success' });
+        } catch (error) {
+          console.error('Error saving cookies:', error);
+          enqueueSnackbar('Error saving cookies', { variant: 'error' });
+        }
+      }
+    };
+
+    window.addEventListener('message', handleMessage);
+    return () => window.removeEventListener('message', handleMessage);
+  }, [config, cookieWindow, onConfigChange]);
 
   // Add save configuration function
   const saveConfiguration = async () => {
