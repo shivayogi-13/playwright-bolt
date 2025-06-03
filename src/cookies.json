@@ -1,0 +1,82 @@
+[
+  {
+    "name": "_cfuvid",
+    "value": "RjvL_ZCFKj9rZ2C3Iosz1AX10X6OZ6JqUuLqzH87r5I-1748900386234-0.0.1.1-604800000",
+    "domain": ".codesandbox.io",
+    "path": "/",
+    "expires": -1,
+    "httpOnly": true,
+    "secure": true,
+    "sameSite": "None"
+  },
+  {
+    "name": "_gid",
+    "value": "GA1.2.1960638383.1748900387",
+    "domain": ".reqres.in",
+    "path": "/",
+    "expires": 1748986786,
+    "httpOnly": false,
+    "secure": false,
+    "sameSite": "Lax"
+  },
+  {
+    "name": "_gat",
+    "value": "1",
+    "domain": ".reqres.in",
+    "path": "/",
+    "expires": 1748900446,
+    "httpOnly": false,
+    "secure": false,
+    "sameSite": "Lax"
+  },
+  {
+    "name": "_gat_gtag_UA_174008107_1",
+    "value": "1",
+    "domain": ".reqres.in",
+    "path": "/",
+    "expires": 1748900446,
+    "httpOnly": false,
+    "secure": false,
+    "sameSite": "Lax"
+  },
+  {
+    "name": "_ga_CESXN06JTW",
+    "value": "GS2.1.s1748900386$o1$g0$t1748900386$j60$l0$h0",
+    "domain": ".reqres.in",
+    "path": "/",
+    "expires": 1783460386.810195,
+    "httpOnly": false,
+    "secure": false,
+    "sameSite": "Lax"
+  },
+  {
+    "name": "_ga",
+    "value": "GA1.1.1790062112.1748900387",
+    "domain": ".reqres.in",
+    "path": "/",
+    "expires": 1783460386.81068,
+    "httpOnly": false,
+    "secure": false,
+    "sameSite": "Lax"
+  },
+  {
+    "name": "_ga_WSM10MMEKC",
+    "value": "GS2.2.s1748900386$o1$g0$t1748900386$j60$l0$h0",
+    "domain": ".reqres.in",
+    "path": "/",
+    "expires": 1783460386.973644,
+    "httpOnly": false,
+    "secure": false,
+    "sameSite": "Lax"
+  },
+  {
+    "name": "cf_clearance",
+    "value": "HW1kuL5JFbNY.1IikMVpaED2mOZ6tM33bTSZ3IjXDCI-1748900389-1.2.1.1-Jx2tUsiEGhtgDePuAVCs2ZYyPCvZMphns5tl_fQNpxh4fPuTDD1U6BjLE8zVuzEFmFoXtO8UQzE1v4xAyKWgyvbcaxtc4N1Q8.PNBGo68NYAgDH9mBk4gKsAUoYY9KBhUcHRF853P_mekbEdKbty5Vw1259hGBWsICpMzKPW5ydi0tGTVa4PAQ7FBNEkz.hftEH8mdv1Ed8aQ2qkdzELTPOucrGSpWjAk_Hl8QAouwmpx_hSxj2lGKNI4hAy.3FeQnCUx43v.NF_HluXQjxh8fhFDpA522x_xwT9MqW.DfvHzPGt2KZrVBkAeejblxnIZiaftp4bV5H7iF67VKNopXgU2XG3qnol9Id33mlfkq8",
+    "domain": ".codesandbox.io",
+    "path": "/",
+    "expires": 1780436389.397141,
+    "httpOnly": true,
+    "secure": true,
+    "sameSite": "None"
+  }
+]
