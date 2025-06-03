@@ -33,8 +33,6 @@ import {
   Tab,
   InputAdornment,
   CircularProgress,
-  Switch,
-  FormControlLabel,
 } from '@mui/material';
 import {
   Add as AddIcon,
@@ -134,8 +132,6 @@ interface MFAConfig {
   otpInputXPath: string;
   verifyButtonXPath: string;
   otpCode: string;
-  usernameXPath: string;
-  passwordXPath: string;
 }
 
 interface Cookie {
@@ -186,13 +182,10 @@ const ConfigurationTab: React.FC<ConfigurationTabProps> = ({ config, onConfigCha
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [mfaCode, setMfaCode] = useState('');
-  const [isInternalUser, setIsInternalUser] = useState(false);
   const [mfaConfig, setMfaConfig] = useState<MFAConfig>({
     otpInputXPath: '',
     verifyButtonXPath: '',
-    otpCode: '',
-    usernameXPath: '',
-    passwordXPath: ''
+    otpCode: ''
   });
   const [isCapturing, setIsCapturing] = useState(false);
   const [capturedCookies, setCapturedCookies] = useState<chrome.cookies.Cookie[]>([]);
@@ -276,68 +269,41 @@ const ConfigurationTab: React.FC<ConfigurationTabProps> = ({ config, onConfigCha
 
   // Update the startCookieCapture function
   const startCookieCapture = async () => {
-    if (!loginUrl) {
-      alert('Please enter a login URL');
-      return;
-    }
-
-    setIsCapturing(true);
     try {
-      const requestBody = {
-        url: loginUrl,
-        ...(isInternalUser ? {} : {
-          username,
-          password,
-          usernameXPath: mfaConfig.usernameXPath,
-          passwordXPath: mfaConfig.passwordXPath
-        }),
-        mfaConfig: mfaConfig.otpInputXPath && mfaConfig.verifyButtonXPath && mfaConfig.otpCode ? {
-          otpInputXPath: mfaConfig.otpInputXPath,
-          verifyButtonXPath: mfaConfig.verifyButtonXPath,
-          otpCode: mfaConfig.otpCode
-        } : undefined
-      };
+      if (!loginUrl) {
+        console.log('Error: No login URL provided');
+        enqueueSnackbar('Please enter the login URL first', { variant: 'error' });
+        return;
+      }
 
-      console.log('Sending request to capture cookies with body:', requestBody);
-
+      console.log('Sending request to capture cookies...');
+      enqueueSnackbar('Starting cookie capture...', { variant: 'info' });
+      
       const response = await fetch('http://localhost:3003/api/capture-cookies', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Accept': 'application/json',
-          'Origin': window.location.origin
         },
-        credentials: 'include',
-        mode: 'cors',
-        body: JSON.stringify(requestBody)
+        body: JSON.stringify({ url: loginUrl })
       });
 
       if (!response.ok) {
-        const errorData = await response.json().catch(() => ({ error: 'Unknown error occurred' }));
-        throw new Error(errorData.error || `HTTP error! status: ${response.status}`);
+        throw new Error(`HTTP error! status: ${response.status}`);
       }
 
       const data = await response.json();
-      console.log('Received response:', data);
+      console.log('Cookies captured:', data);
+      enqueueSnackbar('Cookies captured successfully', { variant: 'success' });
       
-      if (data.cookies) {
-        setCapturedCookies(data.cookies);
-        // Save to localStorage
-        const savedConfig = localStorage.getItem('mfaConfig');
-        const parsedConfig = savedConfig ? JSON.parse(savedConfig) : {};
-        localStorage.setItem('mfaConfig', JSON.stringify({
-          ...parsedConfig,
-          capturedCookies: data.cookies
-        }));
-        enqueueSnackbar('Cookies captured successfully', { variant: 'success' });
-      } else {
-        throw new Error('No cookies received from server');
-      }
+      // Update the stored cookies
+      setStoredCookies(data);
+      
+      // Save to localStorage
+      localStorage.setItem('storedCookies', JSON.stringify(data));
+      
     } catch (error) {
       console.error('Error capturing cookies:', error);
-      enqueueSnackbar('Error capturing cookies: ' + (error instanceof Error ? error.message : 'Unknown error'), { variant: 'error' });
-    } finally {
-      setIsCapturing(false);
+      enqueueSnackbar('Error capturing cookies', { variant: 'error' });
     }
   };
 
@@ -615,44 +581,17 @@ const ConfigurationTab: React.FC<ConfigurationTabProps> = ({ config, onConfigCha
       });
 
       if (!response.ok) {
-        const errorData = await response.json();
-        console.error('Server error response:', errorData);
-        throw new Error(errorData.error || 'Failed to capture cookies');
+        throw new Error(`HTTP error! status: ${response.status}`);
       }
 
       const data = await response.json();
-      console.log('Received cookies from server:', data.cookies);
-      
-      // Convert cookies array to object format
-      const cookieObject = data.cookies.reduce((acc: { [key: string]: string }, cookie: any) => {
-        acc[cookie.name] = cookie.value;
-        return acc;
-      }, {});
-      console.log('Converted cookies to object format:', cookieObject);
-
-      // Update stored cookies
-      console.log('Updating stored cookies state...');
-      setStoredCookies(cookieObject);
-      
-      // Save to localStorage
-      console.log('Saving cookies to localStorage...');
-      localStorage.setItem('storedCookies', JSON.stringify(cookieObject));
-      
-      // Update config with captured cookies
-      console.log('Updating configuration with captured cookies...');
-      onConfigChange({
-        ...config,
-        capturedCookies: cookieObject
-      });
-
-      console.log('=== Cookie Capture Complete ===');
+      console.log('Cookies captured:', data);
       enqueueSnackbar('Cookies captured successfully', { variant: 'success' });
-      return data.cookies;
-
-    } catch (error: any) {
-      console.error('=== Cookie Capture Error ===');
-      console.error('Error capturing cookies:', error);
-      enqueueSnackbar(`Error capturing cookies: ${error.message}`, { variant: 'error' });
+      
+      return data;
+    } catch (error) {
+      console.error('Error in fetchCookiesFromTab:', error);
+      enqueueSnackbar('An error occurred while capturing cookies', { variant: 'error' });
       return [];
     }
   };
@@ -700,9 +639,7 @@ const ConfigurationTab: React.FC<ConfigurationTabProps> = ({ config, onConfigCha
           setMfaConfig(parsedConfig.mfaConfig || {
             otpInputXPath: '',
             verifyButtonXPath: '',
-            otpCode: '',
-            usernameXPath: '',
-            passwordXPath: ''
+            otpCode: ''
           });
           setStoredCookies(parsedConfig.capturedCookies || {});
         }
@@ -734,18 +671,6 @@ const ConfigurationTab: React.FC<ConfigurationTabProps> = ({ config, onConfigCha
       <form onSubmit={(e) => { e.preventDefault(); startCookieCapture(); }}>
         <Grid container spacing={2}>
           <Grid item xs={12}>
-            <FormControlLabel
-              control={
-                <Switch
-                  checked={isInternalUser}
-                  onChange={(e) => setIsInternalUser(e.target.checked)}
-                  color="primary"
-                />
-              }
-              label="Internal User"
-            />
-          </Grid>
-          <Grid item xs={12}>
             <TextField
               fullWidth
               label="Login URL"
@@ -755,47 +680,25 @@ const ConfigurationTab: React.FC<ConfigurationTabProps> = ({ config, onConfigCha
               helperText="Enter the URL of the application"
             />
           </Grid>
-          {!isInternalUser && (
-            <>
-              <Grid item xs={12}>
-                <TextField
-                  fullWidth
-                  label="Username"
-                  value={username}
-                  onChange={(e) => setUsername(e.target.value)}
-                  helperText="Enter username if the application requires login"
-                />
-              </Grid>
-              <Grid item xs={12}>
-                <TextField
-                  fullWidth
-                  label="Username XPath"
-                  value={mfaConfig.usernameXPath}
-                  onChange={(e) => setMfaConfig(prev => ({ ...prev, usernameXPath: e.target.value }))}
-                  helperText="Enter XPath to locate username input field"
-                />
-              </Grid>
-              <Grid item xs={12}>
-                <TextField
-                  fullWidth
-                  label="Password"
-                  type="password"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  helperText="Enter password if the application requires login"
-                />
-              </Grid>
-              <Grid item xs={12}>
-                <TextField
-                  fullWidth
-                  label="Password XPath"
-                  value={mfaConfig.passwordXPath}
-                  onChange={(e) => setMfaConfig(prev => ({ ...prev, passwordXPath: e.target.value }))}
-                  helperText="Enter XPath to locate password input field"
-                />
-              </Grid>
-            </>
-          )}
+          <Grid item xs={12}>
+            <TextField
+              fullWidth
+              label="Username (Optional)"
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              helperText="Enter username if the application requires login"
+            />
+          </Grid>
+          <Grid item xs={12}>
+            <TextField
+              fullWidth
+              label="Password (Optional)"
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              helperText="Enter password if the application requires login"
+            />
+          </Grid>
           <Grid item xs={12}>
             <Typography variant="subtitle1" gutterBottom>
               MFA Configuration (Optional)
@@ -1084,17 +987,6 @@ function ApiRequestsPanel() {
   const [cookieCaptureWindow, setCookieCaptureWindow] = useState<Window | null>(null);
   const [activeTab, setActiveTab] = useState(0);
   const [newTag, setNewTag] = useState('');
-  const [loginUrl, setLoginUrl] = useState('');
-  const [username, setUsername] = useState('');
-  const [password, setPassword] = useState('');
-  const [isInternalUser, setIsInternalUser] = useState(false);
-  const [mfaConfig, setMfaConfig] = useState<MFAConfig>({
-    otpInputXPath: '',
-    verifyButtonXPath: '',
-    otpCode: '',
-    usernameXPath: '',
-    passwordXPath: ''
-  });
 
   // Load saved data on mount
   useEffect(() => {

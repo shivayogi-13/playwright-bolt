@@ -2,9 +2,18 @@ import express, { Request, Response } from 'express';
 import { chromium, Cookie } from 'playwright';
 import { exec } from 'child_process';
 import { promisify } from 'util';
+import { homedir } from 'os';
+import { join } from 'path';
+import { mkdtempSync } from 'fs';
 
 const execAsync = promisify(exec);
 const router = express.Router();
+
+// Function to get temporary user data directory
+const getTempUserDataDir = () => {
+  const tempDir = join(homedir(), 'AppData', 'Local', 'Temp');
+  return mkdtempSync(join(tempDir, 'playwright-'));
+};
 
 // Health check endpoint
 router.get('/', (req: Request, res: Response) => {
@@ -94,9 +103,11 @@ router.post('/get-cookies', async (req: Request, res: Response) => {
 
 // Endpoint to capture cookies from a URL
 router.post('/capture-cookies', async (req: Request, res: Response) => {
-  const { url } = req.body;
+  const { url, username, password, usernameXPath, passwordXPath, mfaConfig } = req.body;
   console.log('=== Cookie Capture Request ===');
   console.log('Request received for URL:', url);
+  console.log('Username XPath:', usernameXPath);
+  console.log('Password XPath:', passwordXPath);
 
   if (!url) {
     console.log('Error: URL is missing');
@@ -104,21 +115,25 @@ router.post('/capture-cookies', async (req: Request, res: Response) => {
   }
 
   console.log(`Starting cookie capture for URL: ${url}`);
-  let browser;
+  let context;
   try {
-    console.log('Launching browser...');
-    browser = await chromium.launch({ 
+    const userDataDir = getTempUserDataDir();
+    console.log('Using temporary user data directory:', userDataDir);
+    
+    console.log('Launching browser with persistent context...');
+    context = await chromium.launchPersistentContext(userDataDir, {
       headless: false,
+      channel: 'chrome',
       args: [
         '--disable-web-security',
         '--no-sandbox',
-        '--disable-setuid-sandbox'
-      ]
-    });
-
-    console.log('Creating new browser context...');
-    const context = await browser.newContext({
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        '--disable-setuid-sandbox',
+        '--remote-debugging-port=9222',
+        '--remote-allow-origins=*'
+      ],
+      ignoreDefaultArgs: ['--enable-automation'],
+      viewport: { width: 1280, height: 720 },
+      ignoreHTTPSErrors: true
     });
     
     console.log('Creating new page...');
@@ -127,15 +142,118 @@ router.post('/capture-cookies', async (req: Request, res: Response) => {
     page.setDefaultNavigationTimeout(60000);
 
     try {
-      console.log('Navigating to URL...');
+      console.log('Navigating to URL:', url);
       await page.goto(url, { 
         waitUntil: 'domcontentloaded',
         timeout: 60000 
       });
       console.log('Navigation completed');
+
+      // Handle login if username and password are provided
+      if (username && password && usernameXPath && passwordXPath) {
+        console.log('Attempting to fill login form...');
+        
+        try {
+          // Wait for username field using XPath
+          console.log('Waiting for username field with XPath:', usernameXPath);
+          const usernameField = await page.waitForSelector(`xpath=${usernameXPath}`, { timeout: 10000 });
+          if (!usernameField) {
+            throw new Error('Username field not found with XPath: ' + usernameXPath);
+          }
+          console.log('Username field found, entering username...');
+          await usernameField.fill(username);
+          
+          // Wait for password field using XPath
+          console.log('Waiting for password field with XPath:', passwordXPath);
+          const passwordField = await page.waitForSelector(`xpath=${passwordXPath}`, { timeout: 10000 });
+          if (!passwordField) {
+            throw new Error('Password field not found with XPath: ' + passwordXPath);
+          }
+          console.log('Password field found, entering password...');
+          await passwordField.fill(password);
+          
+          // Try to find and click the login button
+          console.log('Looking for login button...');
+          const loginButtonFound = await page.evaluate((pwdXPath) => {
+            try {
+              const pwdField = document.evaluate(pwdXPath, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue as HTMLElement;
+              if (!pwdField) {
+                console.log('Password field not found');
+                return false;
+              }
+
+              // Try to find the next button or input[type="submit"] after the password field
+              const nextElement = pwdField.nextElementSibling as HTMLElement;
+              if (nextElement && (nextElement.tagName === 'BUTTON' || 
+                  (nextElement.tagName === 'INPUT' && nextElement.getAttribute('type') === 'submit'))) {
+                console.log('Found submit button after password field');
+                return true;
+              }
+
+              // Look for a form and its submit button
+              const form = pwdField.closest('form');
+              if (form) {
+                const submitButton = form.querySelector('button[type="submit"], input[type="submit"]');
+                if (submitButton) {
+                  console.log('Found submit button in form');
+                  return true;
+                }
+              }
+
+              console.log('No submit button found');
+              return false;
+            } catch (error) {
+              console.error('Error finding login button:', error);
+              return false;
+            }
+          }, passwordXPath);
+
+          if (loginButtonFound) {
+            console.log('Login button found, clicking...');
+            await page.keyboard.press('Enter');
+          } else {
+            console.log('No login button found, waiting for manual login...');
+          }
+        } catch (error) {
+          console.error('Error during login form filling:', error);
+          throw new Error(`Failed to fill login form: ${error instanceof Error ? error.message : 'Unknown error'}`);
+        }
+      }
+
+      // Handle MFA if configured
+      if (mfaConfig && mfaConfig.otpInputXPath && mfaConfig.verifyButtonXPath && mfaConfig.otpCode) {
+        console.log('MFA configuration detected, waiting for MFA screen...');
+        
+        try {
+          // Wait for MFA input field using XPath
+          console.log('Waiting for MFA input field with XPath:', mfaConfig.otpInputXPath);
+          const mfaInputField = await page.waitForSelector(`xpath=${mfaConfig.otpInputXPath}`, { timeout: 10000 });
+          if (!mfaInputField) {
+            throw new Error('MFA input field not found with XPath: ' + mfaConfig.otpInputXPath);
+          }
+          console.log('MFA input field found, entering code...');
+          
+          // Clear any existing value and enter MFA code
+          await mfaInputField.fill('');
+          await mfaInputField.fill(mfaConfig.otpCode);
+          
+          // Wait for verify button using XPath and click it
+          console.log('Waiting for verify button with XPath:', mfaConfig.verifyButtonXPath);
+          const verifyButton = await page.waitForSelector(`xpath=${mfaConfig.verifyButtonXPath}`, { timeout: 10000 });
+          if (!verifyButton) {
+            throw new Error('Verify button not found with XPath: ' + mfaConfig.verifyButtonXPath);
+          }
+          console.log('Verify button found, clicking...');
+          await verifyButton.click();
+        } catch (error) {
+          console.error('Error during MFA handling:', error);
+          throw new Error(`Failed to handle MFA: ${error instanceof Error ? error.message : 'Unknown error'}`);
+        }
+      }
+
     } catch (error: unknown) {
       if (error instanceof Error) {
-        console.warn('Navigation warning:', error.message);
+        console.warn('Navigation or login warning:', error.message);
       }
     }
 
@@ -189,10 +307,10 @@ router.post('/capture-cookies', async (req: Request, res: Response) => {
       res.status(500).json({ error: 'An unknown error occurred' });
     }
   } finally {
-    if (browser) {
-      console.log('Closing browser...');
-      await browser.close();
-      console.log('Browser closed');
+    if (context) {
+      console.log('Closing browser context...');
+      await context.close();
+      console.log('Browser context closed');
     }
   }
 });
